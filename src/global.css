@@ -1,0 +1,17 @@
+[data-rail='1'] {
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+[data-rail='1']::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
+[data-rail='1'] > * {
+  width: max-content !important;
+  flex-wrap: nowrap !important;
+}
