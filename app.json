@@ -8,7 +8,7 @@
     "scheme": "jellyfyplayer",
     "userInterfaceStyle": "dark",
     "ios": {
-      "icon": "./assets/expo.icon",
+      "icon": "./assets/images/icon.png",
       "bundleIdentifier": "app.jellyfy.player",
       "supportsTablet": true,
       "infoPlist": {
@@ -44,7 +44,7 @@
         {
           "backgroundColor": "#121212",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 160
         }
       ],
       [

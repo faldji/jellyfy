@@ -2,6 +2,7 @@ import { Redirect, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -137,6 +138,11 @@ export default function LoginScreen() {
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}>
           <View style={styles.hero}>
+            <Image
+              source={require('../../assets/images/logo.png')}
+              style={styles.logo}
+              accessibilityIgnoresInvertColors
+            />
             <Text style={[styles.mark, { color: c.text }]}>Jellyfy</Text>
             <Text style={[styles.tag, { color: c.textSub }]}>Music from your Jellyfin server</Text>
           </View>
@@ -247,6 +253,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   scroll: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: spacing.xl, paddingVertical: 24 },
   hero: { alignItems: 'center', marginBottom: 32, gap: 8 },
+  logo: { width: 88, height: 88, borderRadius: 22, marginBottom: 8 },
   mark: { fontSize: 48, fontWeight: '900', letterSpacing: -1.5 },
   tag: { fontSize: 16 },
   form: { gap: 10 },
