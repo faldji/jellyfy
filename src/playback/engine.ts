@@ -1,12 +1,12 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   createAudioPlayer,
-  setAudioModeAsync,
   requestNotificationPermissionsAsync,
+  setAudioModeAsync,
   type AudioPlayer,
   type AudioSample,
   type AudioStatus,
 } from 'expo-audio';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 import { createApi, imageUrl, streamHeaders, streamUrl, type Session } from '@/api/jellyfin';
@@ -17,27 +17,37 @@ import { queryKeys } from '@/api/query-keys';
 import { fetchSrNext, fetchSrRadio, hydrateSrTracks, isSrEnabled, postSrEventSafe } from '@/api/sr';
 import type { BaseItem, PlaybackOrder, PlayMethod, RepeatMode } from '@/api/types';
 import { takeCachedTracks } from '@/lib/derive-media';
-import { buildPlayingBody } from '@/playback/report';
-import { createPlaySessionId, sameId } from '@/lib/ids';
 import { artistLine, secondsToTicks, ticksToSeconds } from '@/lib/format';
+import { createPlaySessionId, sameId } from '@/lib/ids';
 import { isAudio } from '@/lib/media';
 import { rangeContaining } from '@/lib/media-buffer';
-import { useDownloads } from '@/store/downloads';
-import { useRecents } from '@/store/recents';
 import { resolvePlayAllLimit } from '@/lib/play-all';
+import {
+  acceptCompletion,
+  armCompletion,
+  disarmCompletion,
+  idleCompletionGate,
+  isNativeTrackComplete,
+  resolveAutoAdvance,
+  resolveUserNext,
+  type CompletionGate,
+} from '@/playback/advance';
+import { silenceHtmlAudio } from '@/playback/html-audio';
+import { bindMediaSessionSkip } from '@/playback/media-session';
+import { buildPlayingBody } from '@/playback/report';
 import {
   isNativeLoopWrap,
   leaveEventType,
   playheadLooksStuckAtEnd,
 } from '@/playback/transport';
-import { bindMediaSessionSkip } from '@/playback/media-session';
-import { silenceHtmlAudio } from '@/playback/html-audio';
 import {
   canPumpMp3,
   createMediaSourceHandle,
   pumpIntoMediaSource,
   revokeMediaSourceUrl,
 } from '@/playback/web-source';
+import { useDownloads } from '@/store/downloads';
+import { useRecents } from '@/store/recents';
 import { useSettings } from '@/store/settings';
 import { useToast } from '@/store/toast';
 
@@ -218,6 +228,7 @@ export class PlaybackEngine {
   private ignoreEndUntil = 0;
   private lastPos = 0;
   private lastPosAt = 0;
+  private completion: CompletionGate = idleCompletionGate();
   private nextGate: Promise<void> | null = null;
   private attachGate: Promise<void> | null = null;
   private loadGen = 0;
@@ -408,6 +419,7 @@ export class PlaybackEngine {
     this.preparing = false;
     this.error = null;
     this.reportedStartFor = null;
+    this.completion = idleCompletionGate();
     silenceHtmlAudio();
     try {
       this.player?.pause();
@@ -600,6 +612,7 @@ export class PlaybackEngine {
     this.endedHandled = true;
     this.advancing = true;
     this.ignoreEndUntil = Date.now() + 2000;
+    this.completion = disarmCompletion(this.loadGen);
     this.abortWebSource();
     this.htmlBufferUnsub?.();
     this.htmlBufferUnsub = null;
@@ -800,24 +813,27 @@ export class PlaybackEngine {
   private async nextImpl(gen: number) {
     if (this.order.length === 0) return;
     const leaving = this.currentItem();
-    const pos = this.displayPosition();
-    const dur = this.displayDuration();
     const naturalEnd = this.endedHandled;
     this.leaveCurrent(naturalEnd);
-    if (this.repeat === 'one') {
+    const decision = resolveAutoAdvance({
+      index: this.index,
+      queueLength: this.order.length,
+      repeat: this.repeat,
+    });
+    if (decision.action === 'replay') {
       this.emitSrReplay(leaving);
       this.emitSrOnStart = false;
       this.endedHandled = false;
       this.advancing = false;
       this.wantPlaying = true;
       this.resetPlayhead = true;
+      this.completion = armCompletion(this.loadGen, leaving?.id ?? null);
       await this.seek(0);
       if (gen !== this.moveGen) return;
       await this.safePlay();
       return;
     }
-    const last = this.index >= this.order.length - 1;
-    if (last && this.repeat !== 'all') {
+    if (decision.action === 'stop') {
       const extended = await this.extendQueueFromSr();
       if (gen !== this.moveGen) return;
       if (extended) {
@@ -834,7 +850,7 @@ export class PlaybackEngine {
       return;
     }
     this.releaseSession();
-    this.index = last ? 0 : this.index + 1;
+    this.index = decision.index;
     this.queued = null;
     this.wantPlaying = true;
     if (gen !== this.moveGen) return;
@@ -913,6 +929,7 @@ export class PlaybackEngine {
     const target = first ? this.order.length - 1 : this.index - 1;
     return this.enqueueTransition(async (gen) => {
       if (this.index === target) return;
+      this.completion = disarmCompletion(this.loadGen);
       this.leaveCurrent(false);
       this.releaseSession();
       this.index = target;
@@ -927,13 +944,13 @@ export class PlaybackEngine {
   /** Lock-screen / headset next: skip the current track even when repeat-one is on. */
   async userNext() {
     if (this.order.length === 0) return;
-    const last = this.index >= this.order.length - 1;
-    if (!last) {
-      await this.skipTo(this.index + 1);
-      return;
-    }
-    if (this.repeat === 'all') {
-      await this.skipTo(0);
+    const decision = resolveUserNext({
+      index: this.index,
+      queueLength: this.order.length,
+      repeat: this.repeat,
+    });
+    if (decision.action === 'next' || decision.action === 'wrap') {
+      await this.skipTo(decision.index);
       return;
     }
     await this.next();
@@ -947,6 +964,7 @@ export class PlaybackEngine {
   async skipTo(index: number) {
     if (index < 0 || index >= this.order.length) return;
     if (index === this.index) return;
+    this.completion = disarmCompletion(this.loadGen);
     return this.enqueueTransition(async (gen) => {
       if (index === this.index) return;
       this.leaveCurrent(false);
@@ -1289,6 +1307,7 @@ export class PlaybackEngine {
     this.pendingSeek = 0;
     this.advancing = false;
     this.endedHandled = true;
+    this.completion = disarmCompletion(this.loadGen);
     silenceHtmlAudio();
     try {
       this.player?.pause();
@@ -1301,27 +1320,12 @@ export class PlaybackEngine {
   }
 
   private async advanceFromEnd() {
-    if (this.endedHandled || this.advancing) return;
     this.endedHandled = true;
     this.advancing = true;
     this.startOffset = 0;
     this.pendingSeek = 0;
     this.ignoreEndUntil = Date.now() + 1500;
     await this.next();
-  }
-
-  private reachedEnd(status: AudioStatus): boolean {
-    if (Date.now() < this.ignoreEndUntil) return false;
-    if (this.resetPlayhead) return false;
-    if (this.pendingSeek > 0.05) return false;
-    if (status.didJustFinish) return true;
-    if (!this.wantPlaying) return false;
-    const dur = this.displayDuration();
-    const pos = this.displayPosition();
-    if (!(dur > 2) || !(pos > 0)) return false;
-    const remain = dur - pos;
-    if (remain > Math.max(0.35, dur * 0.012)) return false;
-    return Date.now() - this.lastPosAt > 800 && Math.abs(pos - this.lastPos) < 0.08;
   }
 
   private async loadCurrent(autoplay: boolean, startSeconds = 0) {
@@ -1333,6 +1337,7 @@ export class PlaybackEngine {
     if (!item) {
       this.advancing = false;
       this.wantPlaying = false;
+      this.completion = disarmCompletion(gen);
       this.emit();
       return;
     }
@@ -1345,6 +1350,7 @@ export class PlaybackEngine {
     this.advancing = true;
     this.endedHandled = true;
     this.ignoreEndUntil = Date.now() + 2500;
+    this.completion = armCompletion(gen, item.id);
     this.lastPos = startSeconds;
     this.lastPosAt = Date.now();
     this.lastMediaTime = 0;
@@ -1434,6 +1440,7 @@ export class PlaybackEngine {
           name: item.name,
         });
         revokeMediaSourceUrl(staleUrl);
+        this.applyLockScreen(item);
         if (preferFileSeek && start > 0.05) {
           try {
             await player.seekTo(start);
@@ -1453,7 +1460,6 @@ export class PlaybackEngine {
       }
       if (gen !== this.loadGen) return;
       this.bindHtmlBufferWatch();
-      this.applyLockScreen(item);
       useRecents.getState().touch(item);
       this.emit();
     } catch (error) {
@@ -1472,12 +1478,16 @@ export class PlaybackEngine {
     const player = this.player;
     if (!session || !player) return;
     const artworkUrl = imageUrl(session, item, 600) ?? undefined;
-    player.setActiveForLockScreen(true, {
-      title: item.name,
-      artist: artistLine(item),
-      albumTitle: item.album,
-      artworkUrl,
-    });
+    try {
+      player.setActiveForLockScreen(true, {
+        title: item.name,
+        artist: artistLine(item),
+        albumTitle: item.album,
+        artworkUrl,
+      });
+    } catch (error) {
+      console.warn('Failed to activate lock-screen controls', error);
+    }
     bindMediaSessionSkip(this);
   }
 
@@ -1486,6 +1496,7 @@ export class PlaybackEngine {
       this.error = status.error;
     }
 
+    const nativeComplete = isNativeTrackComplete(status);
     const requestedStart = this.startOffset > 0.05 ? this.startOffset : 0;
     const stuck = playheadLooksStuckAtEnd(
       status.currentTime,
@@ -1493,7 +1504,9 @@ export class PlaybackEngine {
       status.didJustFinish,
       requestedStart
     );
-    if (this.resetPlayhead && stuck && Date.now() < this.ignoreEndUntil) {
+    // resetPlayhead is only for replace() keeping the previous currentTime at
+    // the start of a track. A native complete after the ignore window is real.
+    if (this.resetPlayhead && stuck && !nativeComplete && Date.now() < this.ignoreEndUntil) {
       if (this.player) {
         void Promise.resolve(this.player.seekTo(0))
           .then(() => {
@@ -1504,7 +1517,7 @@ export class PlaybackEngine {
       this.emit();
       return;
     }
-    if (this.resetPlayhead && !status.didJustFinish && status.currentTime <= 1.25) {
+    if (this.resetPlayhead && !nativeComplete && status.currentTime <= 1.25) {
       this.resetPlayhead = false;
     }
 
@@ -1514,7 +1527,7 @@ export class PlaybackEngine {
       this.repeat === 'one' &&
       !this.advancing &&
       !this.resetPlayhead &&
-      !status.didJustFinish &&
+      !nativeComplete &&
       isNativeLoopWrap(prevMedia, this.lastMediaTime, this.displayDuration() || status.duration)
     ) {
       const item = this.currentItem();
@@ -1533,13 +1546,13 @@ export class PlaybackEngine {
       this.lastPosAt = Date.now();
     }
 
-    if (this.advancing && status.playing && !status.didJustFinish && status.currentTime > 0.12) {
+    if (status.playing && !nativeComplete && status.currentTime > 0.12) {
       this.advancing = false;
       this.endedHandled = false;
       this.resetPlayhead = false;
     }
 
-    if (status.isLoaded && this.pendingSeek > 0.05 && !status.didJustFinish) {
+    if (status.isLoaded && this.pendingSeek > 0.05 && !nativeComplete) {
       if (this.canNativeSeek()) {
         void this.applyPendingSeek();
       } else if (this.startOffset > 0.05 || status.duration <= 1) {
@@ -1547,7 +1560,17 @@ export class PlaybackEngine {
       }
     }
 
-    if (this.reachedEnd(status)) {
+    const decision = acceptCompletion({
+      gate: this.completion,
+      itemId: this.currentItem()?.id ?? null,
+      loadGen: this.loadGen,
+      status,
+      now: Date.now(),
+      ignoreEndUntil: this.ignoreEndUntil,
+      pendingSeek: this.pendingSeek,
+    });
+    this.completion = decision.gate;
+    if (decision.accept) {
       void this.advanceFromEnd();
       this.emit();
       return;
@@ -1621,7 +1644,7 @@ export class PlaybackEngine {
 
   private syncWantPlayingFromStatus(status: AudioStatus) {
     if (this.advancing || this.preparing || this.resetPlayhead) return;
-    if (!status.isLoaded || status.didJustFinish || status.isBuffering) return;
+    if (!status.isLoaded || isNativeTrackComplete(status) || status.isBuffering) return;
     if (this.pendingSeek > 0.05) return;
     if (this.wantPlaying === status.playing) return;
     this.wantPlaying = status.playing;

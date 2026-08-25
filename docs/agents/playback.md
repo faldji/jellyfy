@@ -54,6 +54,16 @@ Progress POSTs omit `nowPlayingQueue`. Start and stop still send the queue. SR d
 
 Seek: native `seekTo` when the player duration matches the item (or the playhead is inside the HTML buffered range); otherwise reopen `loadCurrent`.
 
+## End of track
+
+`src/playback/advance.ts` owns completion + next-index. The engine does **not** treat a stalled playhead as the end of a track.
+
+Native `playbackStatusUpdate` with `didJustFinish` (or `playbackState === 'ended'`) is the completion signal. expo-audio 57 only emits periodic ticks while `playing` is true, so a JS position timer cannot see the end after ExoPlayer has already stopped â€” that path fails on an Android lock screen.
+
+A `CompletionGate` (`loadGen` + item id) makes advancement idempotent: duplicate `didJustFinish`, a stale complete from the previous source, and manual next racing auto-complete cannot skip a track. `resetPlayhead` is only for `replace()` keeping the old `currentTime` at the start of a track; it must not veto a native complete.
+
+`player.loop` stays false. Repeat-one is seek-to-0. Lock-screen/headset next uses `userNext()` (skips even on repeat-one). expo-audio 57.0.4 `AudioPlayer` lock-screen buttons are play/pause (optional Â±10s seek); they are not a native playlist skip.
+
 ## Reporting
 
 Serialized on `reportChain`.
