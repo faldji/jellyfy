@@ -16,9 +16,9 @@ function liquidGlassOn(): boolean {
   }
 }
 
-/** Wraps page content so overlay `GlassSurface`s can blur it on Android 12+. */
 export function GlassProvider({ children }: { children: ReactNode }) {
   const targetRef = useRef<View | null>(null);
+
   return (
     <GlassTargetContext.Provider value={targetRef}>
       <BlurTargetView ref={targetRef} style={styles.fill}>
@@ -34,7 +34,6 @@ type Props = {
   intensity?: number;
 };
 
-/** Frosted chrome. Liquid glass on supported iOS, BlurView elsewhere, tinted fallback. */
 export function GlassSurface({ style, children, intensity }: Props) {
   const c = useColors();
   const target = useContext(GlassTargetContext);
@@ -59,8 +58,8 @@ export function GlassSurface({ style, children, intensity }: Props) {
       style={[styles.clip, style]}
       intensity={strength}
       tint={tint}
-      blurTarget={target ?? undefined}
-      blurMethod={Platform.OS === 'android' ? 'dimezisBlurViewSdk31Plus' : undefined}>
+      blurTarget={Platform.OS === 'android' ? (target ?? undefined) : undefined}
+      blurMethod="none">
       <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: c.glass }]} />
       {children}
     </BlurView>
