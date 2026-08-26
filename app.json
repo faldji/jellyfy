@@ -62,7 +62,8 @@
       ],
       "expo-secure-store",
       "expo-asset",
-      "expo-image"
+      "expo-image",
+      "./plugins/withExpoAudioMediaControls"
     ],
     "experiments": {
       "typedRoutes": true,
