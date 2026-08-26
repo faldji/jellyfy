@@ -11,6 +11,10 @@ export type CompletionGate = {
 export type NativePlaybackSignal = {
   didJustFinish?: boolean;
   playbackState?: string;
+  isLoaded?: boolean;
+  playing?: boolean;
+  currentTime?: number;
+  duration?: number;
 };
 
 export type AutoAdvanceAction = 'replay' | 'next' | 'wrap' | 'stop';
@@ -36,14 +40,24 @@ export function disarmCompletion(loadGen: number): CompletionGate {
 }
 
 /**
- * Explicit native completion only.
- * expo-audio 57 emits `didJustFinish` once on STATE_ENDED / AVPlayerItemDidPlayToEndTime.
- * Periodic `playbackStatusUpdate` ticks stop when `playing` is false, so a JS
- * position-stall timer cannot observe the end while the screen is locked.
+ * Explicit native completion is preferred. Android can occasionally stop at the
+ * final position without exposing a reliable didJustFinish/playbackState signal,
+ * so a loaded finite track that is no longer playing at its end is also treated
+ * as complete.
  */
 export function isNativeTrackComplete(status: NativePlaybackSignal | null | undefined): boolean {
   if (!status) return false;
-  return Boolean(status.didJustFinish) || status.playbackState === 'ended';
+  if (status.didJustFinish || status.playbackState === 'ended') return true;
+  const duration = Number(status.duration ?? 0);
+  const position = Number(status.currentTime ?? 0);
+  return Boolean(
+    status.isLoaded &&
+      !status.playing &&
+      Number.isFinite(duration) &&
+      duration > 1 &&
+      Number.isFinite(position) &&
+      position >= duration - 0.35
+  );
 }
 
 export function acceptCompletion(input: {
@@ -77,10 +91,6 @@ export function acceptCompletion(input: {
   return { accept: true, gate: { ...gate, consumed: true }, reason: 'accepted' };
 }
 
-/**
- * Next index in the *play* order (already shuffled if shuffle is on).
- * Queue-end + SR extension is the engine's job after `stop`.
- */
 export function resolveAutoAdvance(input: {
   index: number;
   queueLength: number;
