@@ -3,15 +3,15 @@ import { Children, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
   useWindowDimensions,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  type ViewStyle,
+  type ScrollViewInstance,
 } from 'react-native';
-import { ScrollView } from 'react-native-gesture-handler';
 
 import { spacing } from '@/constants/theme';
 import { useColors } from '@/theme/useColors';
@@ -52,7 +52,7 @@ function railItems(children: React.ReactNode) {
 export function HorizontalRail({ children }: { children: React.ReactNode }) {
   const c = useColors();
   const { width: windowW } = useWindowDimensions();
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<ScrollViewInstance>(null);
   const [offset, setOffset] = useState(0);
   const [viewport, setViewport] = useState(0);
   const [contentW, setContentW] = useState(0);
@@ -145,7 +145,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     zIndex: 2,
     ...Platform.select({
-      web: { boxShadow: '0 4px 16px rgba(0,0,0,0.28)' } as ViewStyle,
+      web: { boxShadow: '0 4px 16px rgba(0,0,0,0.28)' },
       default: { elevation: 4 },
     }),
   },

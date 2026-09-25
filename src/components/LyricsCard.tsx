@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from 'react-native';
 import { GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -54,7 +54,7 @@ export function LyricsCard({ open, onClose }: Props) {
   const lyrics = useLyrics(current?.id, Boolean(current && open));
   const insets = useSafeAreaInsets();
   const { gesture, style } = useSwipeDownClose(onClose, open);
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<ScrollViewInstance>(null);
   const lineYs = useRef<Record<number, number>>({});
   const follow = useRef(true);
 
