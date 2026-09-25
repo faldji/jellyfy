@@ -147,7 +147,7 @@ export default function LibraryScreen() {
             <LikedCover size={64} />
             <View style={styles.pinMeta}>
               <Text style={[styles.pinName, { color: c.text }]}>Liked Songs</Text>
-              <Text style={[styles.pinSub, { color: c.textSub }]}>Playlist • {userName ?? 'you'}</Text>
+              <Text style={[styles.pinSub, { color: c.textSub }]}>Playlist \u2022 {userName ?? 'you'}</Text>
             </View>
           </Pressable>
           <Pressable style={styles.pinRow} onPress={() => router.push('/downloads')}>
@@ -191,7 +191,7 @@ export default function LibraryScreen() {
         title="Nothing here yet"
         subtitle={likedOnly ? 'Like something to see it here.' : 'Add music in Jellyfin, then pull to refresh.'}
       />
-    ) : null;
+    ) : undefined;
 
   return (
     <View style={[styles.screen, { backgroundColor: c.bg, paddingTop: insets.top + 8 }]}>
@@ -318,7 +318,7 @@ export default function LibraryScreen() {
           query.isFetchingNextPage ? (
             <ActivityIndicator color={c.text} style={{ marginVertical: 20 }} />
           ) : items.length > 0 && !query.hasNextPage ? (
-            <Text style={[styles.end, { color: c.textMuted }]}>You’re all caught up</Text>
+            <Text style={[styles.end, { color: c.textMuted }]}>You\u2019re all caught up</Text>
           ) : (
             <View style={{ height: 12 }} />
           )
@@ -348,7 +348,7 @@ export default function LibraryScreen() {
         title="Sort by"
         actions={availableSorts.map((entry) => ({
           key: entry.key,
-          label: sort === entry.key ? `✓  ${entry.label}` : entry.label,
+          label: sort === entry.key ? `\u2713  ${entry.label}` : entry.label,
           onPress: () => setSort(entry.key),
         }))}
         onClose={() => setSortOpen(false)}
