@@ -4,7 +4,10 @@ Singleton engine and how UI starts music. Read when changing play, seek, queue, 
 
 ## Owner
 
-`src/playback/engine.ts` exports `playback` (`PlaybackEngine`). One `expo-audio` `AudioPlayer` for the process.
+`src/playback/engine.ts` exports `playback` (`PlaybackEngine`). One transport for the process:
+
+- **Web:** one `expo-audio` `AudioPlayer`.
+- **Android and iOS:** one `AudioPlaylist` (SDK 58). Lock-screen next and previous only work on a playlist.
 
 `src/store/player.ts` is a Zustand **mirror**. Screens call `usePlayer` (`playItems`, `togglePlay`, …). They do not write snapshot fields. They do not import `playback`. `SpectrumBars` is the exception (`subscribeSamples`).
 
@@ -33,7 +36,10 @@ Collection chrome uses `useCollectionPlayback(contextId, items, seed?)`. Cover t
 
 Internal: `source` (canonical list) + `order` (permutation) + `index` into `order`.
 
-Snapshot `queue` is `order.map(i => source[i])`. Shuffle rebuilds `order` around the current source index. Repeat is `off | all | one`. `player.loop` stays false; repeat-one is seek-to-0 in the engine.
+Snapshot `queue` is `order.map(i => source[i])`. Shuffle rebuilds `order` around the current source index. Repeat is `off | all | one`.
+
+- Web: `player.loop` stays false. Repeat-one is seek-to-0.
+- Native: `playlist.loop` is `none` / `all` / `single`. A queue change that only appends calls `playlist.add`. Any other change rebuilds the playlist and seeks back if playback was past 0.5s.
 
 On-screen `playItems(list, index)` uses the **loaded** list (album hook limit 500, infinite likes pages, …). The play-all cap applies to `playCollection`, `tracksForItem`, `tracksForMix`, and handoff - not every row tap.
 
@@ -45,24 +51,25 @@ Progress POSTs omit `nowPlayingQueue`. Start and stop still send the queue. SR d
 
 ## Load / seek
 
-1. New `playSessionId`.
+1. `playSessionId`. Web creates it in `loadCurrent`. Native creates one per queued item when that item is added to the playlist (`trackSessions`) and reuses it when the index becomes current.
 2. Local download URI if `useDownloads.isDownloaded`.
 3. Else `streamUrl` (see `docs/agents/api.md`).
-4. Native original or download: seek with `seekTo`. Transcode mid-track: `startTimeTicks` + `startOffset`.
-5. Web: MSE pump (`web-source.ts`) so pause still fills the buffer; fallback `player.replace`.
-6. Recents `touch`. Lock screen metadata.
-
-Seek: native `seekTo` when the player duration matches the item (or the playhead is inside the HTML buffered range); otherwise reopen `loadCurrent`.
+4. Web original/transcode seek: `seekTo` when the duration matches the item or the playhead is inside the HTML buffer; otherwise reopen `loadCurrent` with `startTimeTicks` + `startOffset`.
+5. Native playlist seek: `seekTo`. `startOffset` stays 0.
+6. Web: MSE pump (`web-source.ts`) so pause still fills the buffer; fallback `player.replace`.
+7. Recents `touch`. Lock screen metadata.
 
 ## End of track
 
 `src/playback/advance.ts` owns completion + next-index. The engine does **not** treat a stalled playhead as the end of a track.
 
-Native `playbackStatusUpdate` with `didJustFinish` (or `playbackState === 'ended'`) is the completion signal. expo-audio 57 only emits periodic ticks while `playing` is true, so a JS position timer cannot see the end after ExoPlayer has already stopped â€” that path fails on an Android lock screen.
+`src/playback/advance.ts` owns completion + next-index. The engine does **not** treat a stalled playhead as the end of a track. Status ticks while `playing` are not a completion signal.
 
-A `CompletionGate` (`loadGen` + item id) makes advancement idempotent: duplicate `didJustFinish`, a stale complete from the previous source, and manual next racing auto-complete cannot skip a track. `resetPlayhead` is only for `replace()` keeping the old `currentTime` at the start of a track; it must not veto a native complete.
+Web completion is `playbackStatusUpdate` with `didJustFinish` (or `playbackState === 'ended'`). A `CompletionGate` (`loadGen` + item id) makes that path idempotent: duplicate `didJustFinish`, a stale complete from the previous source, and manual next racing auto-complete cannot skip a track. `resetPlayhead` is only for `replace()` keeping the old `currentTime` at the start of a track; it must not veto a native complete.
 
-`player.loop` stays false. Repeat-one is seek-to-0. Lock-screen/headset next uses `userNext()` (skips even on repeat-one). expo-audio 57.0.4 `AudioPlayer` lock-screen buttons are play/pause (optional Â±10s seek); they are not a native playlist skip.
+On Android and iOS the playlist advances itself. `trackChanged` moves the engine index, reports the leave, and refreshes lock-screen metadata. The engine does not also call `advanceFromEnd` for that skip. The exception is the last track with repeat off: `didJustFinish` still runs the JS path so SR can extend the queue or playback can stop.
+
+Lock screen (`setActiveForLockScreen`): `showNextTrack`, `showPreviousTrack`, `showSeekForward`, `showSeekBackward`. Native next and previous are the playlist's `next()` / `previous()`. In-app previous still restarts the current track when the playhead is past 3 seconds; the lock-screen previous button skips. Web Media Session next/previous go through `userNext()` / `previous()`.
 
 ## Reporting
 
@@ -84,7 +91,7 @@ Queue tail + `continueWithSr`: `fetchSrNext` + hydrate, append unseen ids.
 |---------|--------|-----|
 | Stream | original = static stream + `Authorization` | always universal MP3, token in query |
 | Downloads | yes | throw / hide in the sheet |
-| Lock screen | `setActiveForLockScreen` | `media-session.ts` next/prev only |
+| Lock screen | `AudioPlaylist.setActiveForLockScreen` with next, previous, and ±10s seek | Media Session play, pause, ±seek, next, previous, and now-playing metadata |
 | Extra `<audio>` | n/a | `silenceHtmlAudio` |
 
 ## Handoff
@@ -93,7 +100,8 @@ Queue tail + `continueWithSr`: `fetchSrNext` + hydrate, append unseen ids.
 
 ## Don't
 
-- Construct a second `AudioPlayer` or call `createAudioPlayer` outside the engine.
+- Construct a second `AudioPlayer` or `AudioPlaylist`, or call `createAudioPlayer` / `createAudioPlaylist` outside the engine.
+- Patch `expo-audio` in `node_modules` to fake next/previous. Use `AudioPlaylist` lock-screen options.
 - Start Instant Mix from `playItem` (album/artist/playlist covers).
 - Import `playback` from a screen to call `playItems`.
 - Swallow SR failures by breaking local play. SR is best-effort.

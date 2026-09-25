@@ -23,8 +23,8 @@ One JS runtime. Native modules (`expo-audio`, SecureStore, file system) are call
 | Target | Command | Notes |
 |--------|---------|-------|
 | Metro | `npm start` | Expo Go: browse UI only |
-| Android | `npx expo run:android` | Background audio + lock screen |
-| iOS | `npx expo run:ios` | macOS + Xcode |
+| Android | `npx expo run:android` | Background audio. Lock screen next/previous via `AudioPlaylist` (SDK 58) |
+| iOS | `npx expo run:ios` | macOS + Xcode. Same lock-screen playlist as Android |
 | Web | `npx expo start --web` | Browse + login. CORS on the server. No downloads. |
 
 Background playback needs a development build, not Expo Go. See ADR-0001.
