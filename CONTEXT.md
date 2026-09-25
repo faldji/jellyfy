@@ -1,6 +1,6 @@
 # Jellyfy
 
-A music client for one self-hosted Jellyfin library. Android and iOS are first-class. Web can browse and log in; background audio and lock-screen controls need a native development build.
+A music client for one self-hosted Jellyfin library. Android and iOS are first-class. Web can browse and log in; background audio and lock-screen controls need a native development build. On that build, lock-screen next and previous skip tracks.
 
 Jellyfin is the library of record. This repo is the player. Smart Recommendations (SR) is an optional sidecar: when it is off or down, Jellyfin behavior is unchanged.
 
@@ -29,6 +29,7 @@ Use these words. Do not invent synonyms in issues, ADRs, or new types.
 | **Liked** | Jellyfin `userData.isFavorite` / `filters: ['IsFavorite']`. |
 | **Collection** | Anything started as a list (album, playlist, artist, likes, radio). Identified by `contextId`. |
 | **Queue** | Engine `source` + `order`. Snapshot field `queue` is the playable permutation. |
+| **Lock screen** | Native now-playing controls (play, pause, seek, next, previous). Web uses the browser Media Session. |
 | **Mix / radio** | Jellyfin Instant Mix, or SR radio when SR is on. Context ids `radio:{id}` and `mix:{id}`. |
 | **Similar / fans also like / more like** | Jellyfin `/Similar` plus local ranking. Not SR. |
 | **Recommended / SR** | Optional plugin. Returns `trackId`s; hydrate through Jellyfin `/Items?ids=`. |
