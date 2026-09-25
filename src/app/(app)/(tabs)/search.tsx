@@ -506,7 +506,7 @@ export default function SearchScreen() {
             )
           }
           ListFooterComponent={
-            paged.isFetchingNextPage ? <ActivityIndicator color={c.text} style={{ marginVertical: 16 }} /> : null
+            paged.isFetchingNextPage ? <ActivityIndicator color={c.text} style={{ marginVertical: 16 }} /> : undefined
           }
           onEndReached={() => {
             if (paged.hasNextPage && !paged.isFetchingNextPage) void paged.fetchNextPage();
