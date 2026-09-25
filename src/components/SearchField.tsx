@@ -29,7 +29,7 @@ export function SearchField({
   const muted = inverse ? (c.isDark ? '#6A6A6A' : '#8A8A8A') : c.textMuted;
 
   return (
-    <View style={[styles.box, { backgroundColor: bg, borderColor: inverse ? 'transparent' : c.hairline }, style]}>
+    <View style={[styles.box, { backgroundColor: bg, borderColor: inverse ? 'transparent' : c.hairline }, style] as object}>
       <Ionicons name="search" size={18} color={muted} />
       <TextInput
         value={value}

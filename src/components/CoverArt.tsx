@@ -36,7 +36,7 @@ export function CoverArt({ item, size, rounded = 'album', style }: Props) {
           overflow: 'hidden',
         },
         style,
-      ]}>
+      ] as object}>
       <View style={[StyleSheet.absoluteFill, { backgroundColor: bg2, opacity: 0.55 }]} />
       {uri ? (
         <Image

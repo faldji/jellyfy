@@ -44,7 +44,7 @@ export function GlassSurface({ style, children, intensity }: Props) {
   if (liquid) {
     return (
       <GlassView
-        style={[styles.clip, style]}
+        style={[styles.clip, style] as object}
         glassEffectStyle="regular"
         colorScheme={c.isDark ? 'dark' : 'light'}
         tintColor={c.glassTint}>
@@ -55,7 +55,7 @@ export function GlassSurface({ style, children, intensity }: Props) {
 
   return (
     <BlurView
-      style={[styles.clip, style]}
+      style={[styles.clip, style] as object}
       intensity={strength}
       tint={tint}
       blurTarget={Platform.OS === 'android' ? (target ?? undefined) : undefined}
