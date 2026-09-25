@@ -1,10 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   createAudioPlayer,
+  createAudioPlaylist,
   requestNotificationPermissionsAsync,
   setAudioModeAsync,
   type AudioPlayer,
+  type AudioPlaylist,
+  type AudioPlaylistStatus,
   type AudioSample,
+  type AudioSource,
   type AudioStatus,
 } from 'expo-audio';
 import { Platform } from 'react-native';
@@ -33,7 +37,7 @@ import {
   type CompletionGate,
 } from '@/playback/advance';
 import { silenceHtmlAudio } from '@/playback/html-audio';
-import { bindMediaSessionSkip } from '@/playback/media-session';
+import { bindMediaSession, publishMediaSessionMetadata, syncMediaSessionPlaybackState } from '@/playback/media-session';
 import { buildPlayingBody } from '@/playback/report';
 import {
   isNativeLoopWrap,
@@ -190,6 +194,28 @@ function htmlMedia(player: AudioPlayer | null): HTMLAudioElement | null {
   return null;
 }
 
+function playlistStatusToAudio(status: AudioPlaylistStatus): AudioStatus {
+  return {
+    id: status.id,
+    currentTime: status.currentTime,
+    duration: status.duration,
+    playing: status.playing,
+    isBuffering: status.isBuffering,
+    isLoaded: status.isLoaded,
+    playbackRate: status.playbackRate,
+    mute: status.muted,
+    didJustFinish: status.didJustFinish,
+    loop: status.loop === 'single',
+    shouldCorrectPitch: true,
+    playbackState: status.playing ? 'playing' : status.didJustFinish ? 'ended' : 'paused',
+    timeControlStatus: status.playing ? 'playing' : status.isBuffering ? 'waiting' : 'paused',
+    reasonForWaitingToPlay: status.isBuffering ? 'buffering' : '',
+    isLive: false,
+    currentOffsetFromLive: null,
+    error: null,
+  };
+}
+
 function isAbortError(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'name' in error && (error as { name: string }).name === 'AbortError');
 }
@@ -204,6 +230,12 @@ function isAbortError(error: unknown): boolean {
  */
 export class PlaybackEngine {
   private player: AudioPlayer | null = null;
+  /** Native lock-screen queue. SDK 58 next/previous only exist on AudioPlaylist. */
+  private playlist: AudioPlaylist | null = null;
+  private playlistUnsubs: { remove: () => void }[] = [];
+  private playlistKey = '';
+  private trackSessions: string[] = [];
+  private ignorePlaylistTrack = false;
   private session: Session | null = null;
   private source: BaseItem[] = [];
   private order: number[] = [];
@@ -274,17 +306,15 @@ export class PlaybackEngine {
   }
 
   snapshot(): PlaybackSnapshot {
-    const player = this.player;
-    const status = this.lastStatus;
     const current = this.currentItem();
     return {
       queue: this.playQueue(),
       index: this.index,
       current: this.preparing && this.pendingItem ? this.pendingItem : current,
       playing: this.wantPlaying,
-      buffering: this.preparing || (player?.isBuffering ?? status?.isBuffering ?? false),
+      buffering: this.preparing || this.outputBuffering(),
       preparing: this.preparing,
-      loaded: player?.isLoaded ?? status?.isLoaded ?? false,
+      loaded: this.outputLoaded(),
       position: this.displayPosition(),
       duration: this.displayDuration(),
       buffered: this.displayBuffered(),
@@ -298,6 +328,146 @@ export class PlaybackEngine {
     };
   }
 
+  private outputLoaded(): boolean {
+    return this.playlist?.isLoaded ?? this.player?.isLoaded ?? this.lastStatus?.isLoaded ?? false;
+  }
+
+  private outputBuffering(): boolean {
+    return this.playlist?.isBuffering ?? this.player?.isBuffering ?? this.lastStatus?.isBuffering ?? false;
+  }
+
+  private outputTime(): number {
+    const raw = this.playlist?.currentTime ?? this.player?.currentTime ?? this.lastStatus?.currentTime ?? 0;
+    return Number.isFinite(raw) ? raw : 0;
+  }
+
+  private outputDurationRaw(): number {
+    const raw = this.playlist?.duration ?? this.player?.duration ?? this.lastStatus?.duration ?? 0;
+    return Number.isFinite(raw) ? raw : 0;
+  }
+
+  private outputPause() {
+    try {
+      if (this.playlist) this.playlist.pause();
+      else this.player?.pause();
+    } catch {
+      // Output may already be released.
+    }
+  }
+
+  private outputPlay() {
+    if (this.playlist) this.playlist.play();
+    else this.player?.play();
+  }
+
+  private async outputSeek(seconds: number) {
+    if (this.playlist) await this.playlist.seekTo(seconds);
+    else if (this.player) await this.player.seekTo(seconds);
+  }
+
+  private outputStatus(): AudioStatus | null {
+    if (this.playlist) return playlistStatusToAudio(this.playlist.currentStatus);
+    return this.player?.currentStatus ?? null;
+  }
+
+  private releasePlaylist() {
+    this.playlistUnsubs.forEach((sub) => sub.remove());
+    this.playlistUnsubs = [];
+    try {
+      this.playlist?.pause();
+      this.playlist?.clearLockScreenControls();
+      this.playlist?.destroy();
+    } catch {
+      // Playlist may already be released.
+    }
+    this.playlist = null;
+    this.playlistKey = '';
+    this.trackSessions = [];
+  }
+
+  private syncPlaylistLoop() {
+    if (!this.playlist) return;
+    this.playlist.loop = this.repeat === 'one' ? 'single' : this.repeat === 'all' ? 'all' : 'none';
+  }
+
+  private sourceForQueueItem(item: BaseItem, playSessionId: string): AudioSource {
+    const session = this.session;
+    if (!session) return null;
+    const downloaded = useDownloads.getState().isDownloaded(item.id) ? useDownloads.getState().items[item.id] : undefined;
+    const quality = useSettings.getState().quality;
+    const uri = downloaded?.uri ?? streamUrl(session, item.id, quality, { playSessionId });
+    const headers = downloaded ? undefined : streamHeaders(session);
+    return { uri, headers, name: item.name ?? undefined };
+  }
+
+  private syncPlaylistSources() {
+    const playlist = this.playlist;
+    const session = this.session;
+    if (!playlist || !session) return;
+    const queue = this.playQueue();
+    const key = queue.map((item) => item.id).join('\n');
+    this.syncPlaylistLoop();
+    if (key === this.playlistKey) return;
+
+    const previous = this.playlistKey ? this.playlistKey.split('\n').filter(Boolean) : [];
+    const appended =
+      previous.length > 0 && queue.length >= previous.length && previous.every((id, i) => id === queue[i]?.id);
+    if (appended) {
+      for (let i = previous.length; i < queue.length; i += 1) {
+        const playSessionId = createPlaySessionId();
+        this.trackSessions[i] = playSessionId;
+        const source = this.sourceForQueueItem(queue[i], playSessionId);
+        if (source) playlist.add(source);
+      }
+      this.playlistKey = key;
+      return;
+    }
+
+    this.ignorePlaylistTrack = true;
+    const keepTime = playlist.currentTime;
+    const keepPlaying = this.wantPlaying;
+    this.trackSessions = queue.map(() => createPlaySessionId());
+    playlist.clear();
+    queue.forEach((item, i) => {
+      const source = this.sourceForQueueItem(item, this.trackSessions[i]);
+      if (source) playlist.add(source);
+    });
+    this.playlistKey = key;
+    if (this.index >= 0 && this.index < queue.length) playlist.skipTo(this.index);
+    if (keepTime > 0.5) void playlist.seekTo(keepTime);
+    if (keepPlaying) playlist.play();
+    queueMicrotask(() => {
+      this.ignorePlaylistTrack = false;
+    });
+  }
+
+  private onPlaylistTrackChanged(currentIndex: number) {
+    if (this.ignorePlaylistTrack || currentIndex === this.index) return;
+    if (currentIndex < 0 || currentIndex >= this.order.length) return;
+    const duration = this.lastStatus?.duration ?? 0;
+    const naturalEnd = duration > 1 && this.lastPos >= duration - 1.25;
+    this.leaveCurrent(naturalEnd);
+    this.releaseSession();
+    this.index = currentIndex;
+    this.playSessionId = this.trackSessions[currentIndex] ?? createPlaySessionId();
+    this.trackSessions[currentIndex] = this.playSessionId;
+    this.reportedStartFor = null;
+    this.leftTrackId = null;
+    this.wantPlaying = true;
+    this.advancing = false;
+    this.endedHandled = false;
+    this.resetPlayhead = false;
+    this.startOffset = 0;
+    this.pendingSeek = 0;
+    this.completion = armCompletion(this.loadGen, this.currentItem()?.id ?? null);
+    const item = this.currentItem();
+    if (item) {
+      this.applyLockScreen(item);
+      useRecents.getState().touch(item);
+    }
+    this.emit();
+  }
+
   async attach(session: Session) {
     this.session = session;
     if (!this.attachGate) {
@@ -309,7 +479,7 @@ export class PlaybackEngine {
   }
 
   private async attachImpl() {
-    if (this.player) {
+    if (this.player || this.playlist) {
       this.emit();
       return;
     }
@@ -322,7 +492,7 @@ export class PlaybackEngine {
       interruptionMode: 'doNotMix',
     });
 
-    if (this.player) {
+    if (this.player || this.playlist) {
       this.emit();
       return;
     }
@@ -335,25 +505,36 @@ export class PlaybackEngine {
       }
     }
 
-    this.player = createAudioPlayer(null, {
-      updateInterval: 250,
-      keepAudioSessionActive: true,
-      // Music: keep minutes of audio, not a 20s "headlight" that rides the playhead.
-      preferredForwardBufferDuration: 600,
-    });
-    this.player.loop = false;
-
-    this.unsub = this.player.addListener('playbackStatusUpdate', (status) => {
-      this.onStatus(status);
-    });
-    this.ensureSampling();
+    if (Platform.OS === 'web') {
+      this.player = createAudioPlayer(null, {
+        updateInterval: 250,
+        keepAudioSessionActive: true,
+        preferredForwardBufferDuration: 600,
+      });
+      this.player.loop = false;
+      this.unsub = this.player.addListener('playbackStatusUpdate', (status) => {
+        this.onStatus(status);
+      });
+      this.bindWebMediaSession();
+      this.ensureSampling();
+    } else {
+      this.playlist = createAudioPlaylist({ sources: [], updateInterval: 250, loop: 'none' });
+      this.playlistUnsubs.push(
+        this.playlist.addListener('playlistStatusUpdate', (status) => {
+          this.onStatus(playlistStatusToAudio(status));
+        }),
+        this.playlist.addListener('trackChanged', ({ currentIndex }) => {
+          this.onPlaylistTrackChanged(currentIndex);
+        })
+      );
+    }
 
     if (this.source.length === 0) {
       await this.hydrate();
     }
 
     if (this.wantPlaying && this.currentItem()) {
-      if (!this.player.isLoaded) {
+      if (!this.outputLoaded()) {
         await this.loadCurrent(true, this.displayPosition() || this.restorePosition);
       } else {
         this.emit();
@@ -381,6 +562,7 @@ export class PlaybackEngine {
     this.unsub = null;
     this.wantPlaying = false;
     silenceHtmlAudio();
+    this.releasePlaylist();
     try {
       this.player?.pause();
       this.player?.clearLockScreenControls();
@@ -422,7 +604,7 @@ export class PlaybackEngine {
     this.completion = idleCompletionGate();
     silenceHtmlAudio();
     try {
-      this.player?.pause();
+      this.outputPause();
     } catch {
       // Player may already be released.
     }
@@ -617,7 +799,7 @@ export class PlaybackEngine {
     this.htmlBufferUnsub?.();
     this.htmlBufferUnsub = null;
     try {
-      this.player?.pause();
+      this.outputPause();
     } catch {
       // Player may already be released.
     }
@@ -731,6 +913,7 @@ export class PlaybackEngine {
     next.splice(this.index + 1, 0, sourceIndex);
     this.order = next;
     this.queued = null;
+    this.syncPlaylistSources();
     this.emit();
   }
 
@@ -746,6 +929,7 @@ export class PlaybackEngine {
     this.source = [...this.source, item];
     this.order = [...this.order, this.source.length - 1];
     this.queued = null;
+    this.syncPlaylistSources();
     this.emit();
   }
 
@@ -754,14 +938,13 @@ export class PlaybackEngine {
       this.cancelPrepare();
       return;
     }
-    if (!this.player) return;
+    if (!this.player && !this.playlist) return;
     if (this.wantPlaying) {
       this.wantPlaying = false;
       silenceHtmlAudio(htmlMedia(this.player));
-      this.player.pause();
-      this.lastStatus = this.player.currentStatus
-        ? { ...this.player.currentStatus, playing: false }
-        : this.lastStatus;
+      this.outputPause();
+      const status = this.outputStatus();
+      this.lastStatus = status ? { ...status, playing: false } : this.lastStatus;
       this.emit();
       await this.report('progress', true);
       this.emitSrTransport('PAUSE');
@@ -771,14 +954,13 @@ export class PlaybackEngine {
     this.wantPlaying = true;
     this.emit();
     await this.applyPendingSeek();
-    if (!this.player.isLoaded && this.currentItem()) {
+    if (!this.outputLoaded() && this.currentItem()) {
       await this.loadCurrent(true, this.displayPosition());
       return;
     }
     await this.safePlay();
-    this.lastStatus = this.player.currentStatus
-      ? { ...this.player.currentStatus, playing: true }
-      : this.lastStatus;
+    const playingStatus = this.outputStatus();
+    this.lastStatus = playingStatus ? { ...playingStatus, playing: true } : this.lastStatus;
     this.emit();
     await this.report('progress', false);
     this.emitSrTransport('RESUME');
@@ -787,7 +969,7 @@ export class PlaybackEngine {
   async pause() {
     this.wantPlaying = false;
     silenceHtmlAudio();
-    this.player?.pause();
+    this.outputPause();
     await this.report('progress', true);
     this.emitSrTransport('PAUSE');
     this.emit();
@@ -909,6 +1091,8 @@ export class PlaybackEngine {
         this.source = [...this.source, item];
         this.order = [...this.order, this.source.length - 1];
       }
+      this.queued = null;
+      this.syncPlaylistSources();
       return true;
     } catch {
       return false;
@@ -991,21 +1175,21 @@ export class PlaybackEngine {
     const mediaBuf = this.mediaBufferedEnd();
     const inBuffer = mediaBuf != null && mediaTarget <= mediaBuf + 0.35;
     const canFileSeek = this.canNativeSeek() && this.startOffset <= 0.05;
-    if (this.player && !this.player.currentStatus?.didJustFinish && (canFileSeek || inBuffer)) {
+    const outputReady = Boolean(this.player || this.playlist);
+    if (outputReady && !this.outputStatus()?.didJustFinish && (canFileSeek || inBuffer)) {
       const nativeTarget = canFileSeek ? target : mediaTarget;
       try {
-        await this.player.seekTo(nativeTarget);
-        const landed = this.player.currentTime;
+        await this.outputSeek(nativeTarget);
+        const landed = this.outputTime();
         if (Number.isFinite(landed) && Math.abs(landed - nativeTarget) <= 1.25) {
           this.pendingSeek = 0;
           if (canFileSeek) this.startOffset = 0;
-          this.lastStatus = this.player.currentStatus
-            ? { ...this.player.currentStatus, currentTime: landed, didJustFinish: false }
-            : this.lastStatus;
+          const status = this.outputStatus();
+          this.lastStatus = status ? { ...status, currentTime: landed, didJustFinish: false } : this.lastStatus;
           this.endedHandled = false;
           this.lastPos = canFileSeek ? landed : this.startOffset + landed;
           this.lastPosAt = Date.now();
-          if (resume) this.player.play();
+          if (resume) this.outputPlay();
           await this.report('progress', !resume);
           this.emit();
           return;
@@ -1034,15 +1218,15 @@ export class PlaybackEngine {
       this.order = identityOrder(this.source.length);
       this.index = sourceIndex;
     }
+    this.syncPlaylistSources();
     this.emit();
     await this.report('progress', !this.wantPlaying);
   }
 
   cycleRepeat() {
     this.repeat = this.repeat === 'off' ? 'all' : this.repeat === 'all' ? 'one' : 'off';
-    // Native loop swallows ended() and leaves currentTime at duration across replace().
-    // Repeat-one is handled in software so REPLAY fires and skip-to-next can start at 0.
     if (this.player) this.player.loop = false;
+    this.syncPlaylistLoop();
     this.emit();
   }
 
@@ -1060,7 +1244,15 @@ export class PlaybackEngine {
       this.pendingSeek = 0;
       this.wantPlaying = false;
       silenceHtmlAudio();
-      this.player?.pause();
+      this.outputPause();
+      this.playlistKey = '\u0000';
+      this.trackSessions = [];
+      this.ignorePlaylistTrack = true;
+      this.playlist?.clear();
+      this.playlistKey = '';
+      queueMicrotask(() => {
+        this.ignorePlaylistTrack = false;
+      });
       void this.clearPersisted();
       this.emit();
       return;
@@ -1072,6 +1264,7 @@ export class PlaybackEngine {
       void this.loadCurrent(true);
       return;
     }
+    this.syncPlaylistSources();
     this.emit();
   }
 
@@ -1084,6 +1277,7 @@ export class PlaybackEngine {
     else if (from < this.index && to >= this.index) this.index -= 1;
     else if (from > this.index && to <= this.index) this.index += 1;
     this.order = next;
+    this.syncPlaylistSources();
     this.emit();
   }
 
@@ -1114,7 +1308,7 @@ export class PlaybackEngine {
   }
 
   private mediaTime(): number {
-    const raw = this.player?.currentTime ?? this.lastStatus?.currentTime ?? 0;
+    const raw = this.outputTime();
     return Number.isFinite(raw) ? Math.max(0, raw) : 0;
   }
 
@@ -1189,7 +1383,7 @@ export class PlaybackEngine {
 
   private async safePlay() {
     try {
-      await Promise.resolve(this.player?.play());
+      await Promise.resolve(this.outputPlay());
     } catch (error) {
       if (isAbortError(error)) return;
       throw error;
@@ -1258,7 +1452,7 @@ export class PlaybackEngine {
 
   private displayDuration(): number {
     const fromItem = ticksToSeconds(this.currentItem()?.runTimeTicks);
-    const raw = this.player?.duration ?? this.lastStatus?.duration ?? 0;
+    const raw = this.outputDurationRaw();
     const fromPlayer = Number.isFinite(raw) && raw > 1 ? raw : 0;
     if (this.startOffset > 0) {
       if (fromItem > 0) return fromItem;
@@ -1272,7 +1466,7 @@ export class PlaybackEngine {
     const item = this.currentItem();
     if (!item) return false;
     if (useDownloads.getState().isDownloaded(item.id)) return true;
-    const playerDur = this.player?.duration ?? this.lastStatus?.duration ?? 0;
+    const playerDur = this.outputDurationRaw();
     if (!Number.isFinite(playerDur) || playerDur <= 1) return false;
     const itemDur = ticksToSeconds(item.runTimeTicks);
     if (itemDur > 1 && Math.abs(playerDur - itemDur) > 2.5) return false;
@@ -1281,19 +1475,18 @@ export class PlaybackEngine {
 
   private async applyPendingSeek() {
     const target = this.pendingSeek;
-    if (!(target > 0.05) || !this.player) return;
+    if (!(target > 0.05) || (!this.player && !this.playlist)) return;
     if (!this.canNativeSeek()) return;
     try {
-      await this.player.seekTo(target);
-      const landed = this.player.currentTime;
+      await this.outputSeek(target);
+      const landed = this.outputTime();
       if (!Number.isFinite(landed) || Math.abs(landed - target) > 1.25) {
         return;
       }
       this.pendingSeek = 0;
       this.startOffset = 0;
-      this.lastStatus = this.player.currentStatus
-        ? { ...this.player.currentStatus, currentTime: landed, didJustFinish: false }
-        : this.lastStatus;
+      const status = this.outputStatus();
+      this.lastStatus = status ? { ...status, currentTime: landed, didJustFinish: false } : this.lastStatus;
       this.lastPos = landed;
       this.lastPosAt = Date.now();
     } catch {
@@ -1309,14 +1502,9 @@ export class PlaybackEngine {
     this.endedHandled = true;
     this.completion = disarmCompletion(this.loadGen);
     silenceHtmlAudio();
-    try {
-      this.player?.pause();
-    } catch {
-      // Player may already be released.
-    }
-    this.lastStatus = this.player?.currentStatus
-      ? { ...this.player.currentStatus, playing: false, didJustFinish: false }
-      : this.lastStatus;
+    this.outputPause();
+    const status = this.outputStatus();
+    this.lastStatus = status ? { ...status, playing: false, didJustFinish: false } : this.lastStatus;
   }
 
   private async advanceFromEnd() {
@@ -1328,7 +1516,70 @@ export class PlaybackEngine {
     await this.next();
   }
 
+  private async loadCurrentOnPlaylist(autoplay: boolean, startSeconds = 0) {
+    const session = this.session;
+    const item = this.currentItem();
+    const gen = (this.loadGen += 1);
+    this.wantPlaying = autoplay;
+    if (!item || !session || !this.playlist) {
+      this.advancing = false;
+      this.wantPlaying = false;
+      this.completion = disarmCompletion(gen);
+      this.emit();
+      return;
+    }
+
+    this.error = null;
+    this.advancing = true;
+    this.endedHandled = true;
+    this.ignoreEndUntil = Date.now() + 2500;
+    this.completion = armCompletion(gen, item.id);
+    this.lastPos = Math.max(0, startSeconds);
+    this.lastPosAt = Date.now();
+    this.lastMediaTime = 0;
+    this.lastStatus = null;
+    this.resetPlayhead = startSeconds <= 0.05;
+    this.syncPlaylistSources();
+    if (gen !== this.loadGen || !this.playlist) return;
+
+    this.playSessionId = this.trackSessions[this.index] ?? createPlaySessionId();
+    this.trackSessions[this.index] = this.playSessionId;
+    this.reportedStartFor = null;
+    this.leftTrackId = null;
+    this.startOffset = 0;
+    this.pendingSeek = Math.max(0, startSeconds);
+
+    if (this.playlist.currentIndex !== this.index) {
+      this.ignorePlaylistTrack = true;
+      this.playlist.skipTo(this.index);
+      queueMicrotask(() => {
+        this.ignorePlaylistTrack = false;
+      });
+    }
+
+    this.applyLockScreen(item);
+    if (startSeconds > 0.05) {
+      try {
+        await this.playlist.seekTo(startSeconds);
+        this.pendingSeek = 0;
+        this.resetPlayhead = false;
+      } catch {
+        // Status handler retries via pendingSeek.
+      }
+    }
+    if (gen !== this.loadGen) return;
+    if (autoplay) this.playlist.play();
+    else this.playlist.pause();
+    useRecents.getState().touch(item);
+    this.advancing = false;
+    this.emit();
+  }
+
   private async loadCurrent(autoplay: boolean, startSeconds = 0) {
+    if (this.playlist) {
+      await this.loadCurrentOnPlaylist(autoplay, startSeconds);
+      return;
+    }
     const session = this.session;
     const player = this.player;
     const item = this.currentItem();
@@ -1476,19 +1727,58 @@ export class PlaybackEngine {
   private applyLockScreen(item: BaseItem) {
     const session = this.session;
     const player = this.player;
-    if (!session || !player) return;
+    if (!session || (!player && !this.playlist)) return;
     const artworkUrl = imageUrl(session, item, 600) ?? undefined;
-    try {
-      player.setActiveForLockScreen(true, {
-        title: item.name,
-        artist: artistLine(item),
-        albumTitle: item.album,
+    const artist = artistLine(item);
+    if (Platform.OS === 'web') {
+      // expo-audio's web media session maps next/previous to ±10s seek and
+      // calls the raw player. Own the session so skip and seek go through the engine.
+      publishMediaSessionMetadata({
+        title: item.name ?? '',
+        artist,
+        album: item.album ?? '',
         artworkUrl,
+        playing: this.wantPlaying,
+        position: this.displayPosition(),
+        duration: this.displayDuration(),
       });
+      this.bindWebMediaSession();
+      return;
+    }
+    const metadata = {
+      title: item.name,
+      artist,
+      albumTitle: item.album,
+      artworkUrl,
+    };
+    const options = {
+      showSeekForward: true,
+      showSeekBackward: true,
+      showNextTrack: true,
+      showPreviousTrack: true,
+    };
+    try {
+      if (this.playlist) this.playlist.setActiveForLockScreen(true, metadata, options);
+      else if (player) {
+        player.setActiveForLockScreen(true, metadata, {
+          showSeekForward: true,
+          showSeekBackward: true,
+        });
+      }
     } catch (error) {
       console.warn('Failed to activate lock-screen controls', error);
     }
-    bindMediaSessionSkip(this);
+  }
+
+  private bindWebMediaSession() {
+    bindMediaSession({
+      play: () => (this.wantPlaying ? Promise.resolve() : this.togglePlay()),
+      pause: () => (this.wantPlaying ? this.pause() : Promise.resolve()),
+      userNext: () => this.userNext(),
+      previous: () => this.previous(),
+      seek: (seconds) => this.seek(seconds),
+      position: () => this.displayPosition(),
+    });
   }
 
   private onStatus(status: AudioStatus) {
@@ -1507,13 +1797,11 @@ export class PlaybackEngine {
     // resetPlayhead is only for replace() keeping the previous currentTime at
     // the start of a track. A native complete after the ignore window is real.
     if (this.resetPlayhead && stuck && !nativeComplete && Date.now() < this.ignoreEndUntil) {
-      if (this.player) {
-        void Promise.resolve(this.player.seekTo(0))
-          .then(() => {
-            if (this.wantPlaying) this.player?.play();
-          })
-          .catch(() => {});
-      }
+      void this.outputSeek(0)
+        .then(() => {
+          if (this.wantPlaying) this.outputPlay();
+        })
+        .catch(() => {});
       this.emit();
       return;
     }
@@ -1570,7 +1858,10 @@ export class PlaybackEngine {
       pendingSeek: this.pendingSeek,
     });
     this.completion = decision.gate;
-    if (decision.accept) {
+    const playlistOwnsAdvance = Boolean(
+      this.playlist && (this.repeat === 'one' || this.repeat === 'all' || this.index < this.order.length - 1)
+    );
+    if (decision.accept && !playlistOwnsAdvance) {
       void this.advanceFromEnd();
       this.emit();
       return;
@@ -1648,7 +1939,12 @@ export class PlaybackEngine {
     if (this.pendingSeek > 0.05) return;
     if (this.wantPlaying === status.playing) return;
     this.wantPlaying = status.playing;
-    bindMediaSessionSkip(this);
+    if (Platform.OS === 'web') {
+      syncMediaSessionPlaybackState(this.wantPlaying, {
+        position: this.displayPosition(),
+        duration: this.displayDuration(),
+      });
+    }
     if (status.playing) {
       void this.report('progress', false);
       this.emitSrTransport('RESUME');

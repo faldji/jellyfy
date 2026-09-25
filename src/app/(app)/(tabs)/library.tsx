@@ -191,7 +191,7 @@ export default function LibraryScreen() {
         title="Nothing here yet"
         subtitle={likedOnly ? 'Like something to see it here.' : 'Add music in Jellyfin, then pull to refresh.'}
       />
-    ) : null;
+    ) : undefined;
 
   return (
     <View style={[styles.screen, { backgroundColor: c.bg, paddingTop: insets.top + 8 }]}>

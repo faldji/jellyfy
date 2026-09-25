@@ -17,7 +17,7 @@ export function Skeleton({ style }: { style?: StyleProp<ViewStyle> }) {
     opacity.value = withRepeat(withTiming(0.7, { duration: 800 }), -1, true);
   }, [opacity]);
   const animated = useAnimatedStyle(() => ({ opacity: opacity.value }));
-  return <Animated.View style={[styles.block, { backgroundColor: c.elevate }, animated, style]} />;
+  return <Animated.View style={[styles.block, { backgroundColor: c.elevate }, animated, style] as object} />;
 }
 
 const styles = StyleSheet.create({

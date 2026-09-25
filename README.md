@@ -2,7 +2,7 @@
 
 A music client for a self-hosted Jellyfin library.
 
-- **Stack:** Expo SDK 57 + React Native + TypeScript + Expo Router
+- **Stack:** Expo SDK 58 beta + React Native + TypeScript + Expo Router
 - **Platforms:** Android and iOS (web works for browse/login; background audio is native)
 - **Distribution:** personal / sideload. No Play Store or App Store signing in this repo.
 - **Server API:** Jellyfin 10.12
@@ -16,7 +16,7 @@ A music client for a self-hosted Jellyfin library.
 - Report play state to Jellyfin (`/Sessions/Playing*`)
 - Optional Smart Recommendations sidecar (off by default). When enabled: Home "Recommended for you", radio, and next-track can use SR. If SR is down, Jellyfin behavior is unchanged.
 - Mini player + full player + lyrics when the server has them
-- Lock screen / notification controls and background audio (`expo-audio`)
+- Lock screen / notification controls (play, pause, seek, next, previous) and background audio (`expo-audio` `AudioPlaylist` on Android and iOS)
 - Offline downloads on iOS and Android (`GET /Items/{id}/Download`)
 
 ## Day-0 loop

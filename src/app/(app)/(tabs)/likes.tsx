@@ -87,7 +87,7 @@ export default function LikesTab() {
           )
         }
         ListFooterComponent={
-          liked.isFetchingNextPage ? <ActivityIndicator color={c.text} style={{ marginVertical: 16 }} /> : null
+          liked.isFetchingNextPage ? <ActivityIndicator color={c.text} style={{ marginVertical: 16 }} /> : undefined
         }
       />
       <ActionSheet
