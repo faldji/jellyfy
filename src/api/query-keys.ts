@@ -61,16 +61,28 @@ export const queryKeys = {
     all: ['playlist-items'] as const,
     detail: (userId: string | undefined, id: string | undefined) =>
       ['playlist-items', userId, id] as const,
+    pages: (userId: string | undefined, id: string | undefined, pageSize: number) =>
+      ['playlist-items', userId, id, 'pages', pageSize] as const,
+    play: (userId: string | undefined, id: string | undefined, limit: number) =>
+      ['playlist-items', userId, id, 'play', limit] as const,
   },
   albumTracks: {
     all: ['album-tracks'] as const,
     detail: (userId: string | undefined, id: string | undefined) =>
       ['album-tracks', userId, id] as const,
+    pages: (userId: string | undefined, id: string | undefined, pageSize: number) =>
+      ['album-tracks', userId, id, 'pages', pageSize] as const,
+    play: (userId: string | undefined, id: string | undefined, limit: number) =>
+      ['album-tracks', userId, id, 'play', limit] as const,
   },
   artistTracks: {
     all: ['artist-tracks'] as const,
     detail: (userId: string | undefined, id: string | undefined) =>
       ['artist-tracks', userId, id] as const,
+    pages: (userId: string | undefined, id: string | undefined, pageSize: number) =>
+      ['artist-tracks', userId, id, 'pages', pageSize] as const,
+    play: (userId: string | undefined, id: string | undefined, limit: number) =>
+      ['artist-tracks', userId, id, 'play', limit] as const,
   },
   searchAll: {
     all: ['search-all'] as const,

@@ -4,6 +4,8 @@ import type { BaseItem, ItemQuery, QueryResult } from '@/api/types';
 import { logger } from '@/lib/logger';
 import { isAudio } from '@/lib/media';
 
+
+
 export type SignalOpts = { signal?: AbortSignal };
 
 function hasRows(result: QueryResult): boolean {
@@ -95,38 +97,64 @@ export async function fetchLibraryArtists(
   return api.items({ ...unscoped, includeItemTypes: ['MusicArtist'], recursive: true }, opts);
 }
 
+export async function fetchAlbumTrackPage(
+  api: JellyfinApi,
+  albumId: string,
+  startIndex: number,
+  limit: number,
+  opts?: SignalOpts
+): Promise<QueryResult> {
+  const sort: ItemQuery = {
+    includeItemTypes: ['Audio'],
+    enableTotalRecordCount: true,
+    sortBy: ['ParentIndexNumber', 'IndexNumber'],
+    sortOrder: 'Ascending',
+    startIndex,
+    limit,
+  };
+  const byParent = await api.items({ ...sort, parentId: albumId }, opts);
+  const parentItems = (byParent.items ?? []).filter(isAudio);
+  if (parentItems.length || startIndex > 0 || (byParent.totalRecordCount ?? 0) > 0) {
+    return { ...byParent, items: parentItems };
+  }
+  const byAlbum = await api.items({ ...sort, albumIds: [albumId], recursive: true }, opts);
+  return { ...byAlbum, items: (byAlbum.items ?? []).filter(isAudio) };
+}
+
 export async function fetchAlbumTracks(
   api: JellyfinApi,
   albumId: string,
   limit: number,
   opts?: SignalOpts
 ): Promise<BaseItem[]> {
-  const byParent = await api.items(
-    {
-      parentId: albumId,
-      includeItemTypes: ['Audio'],
-      sortBy: ['ParentIndexNumber', 'IndexNumber'],
-      sortOrder: 'Ascending',
-      limit,
-    },
-    opts
-  );
-  let tracks = (byParent.items ?? []).filter(isAudio);
-  if (!tracks.length) {
-    const byAlbum = await api.items(
-      {
-        albumIds: [albumId],
-        includeItemTypes: ['Audio'],
-        recursive: true,
-        sortBy: ['ParentIndexNumber', 'IndexNumber'],
-        sortOrder: 'Ascending',
-        limit,
-      },
-      opts
-    );
-    tracks = (byAlbum.items ?? []).filter(isAudio);
+  const page = await fetchAlbumTrackPage(api, albumId, 0, limit, opts);
+  return (page.items ?? []).slice(0, limit);
+}
+
+export async function fetchArtistTrackPage(
+  api: JellyfinApi,
+  artistId: string,
+  startIndex: number,
+  limit: number,
+  opts?: SignalOpts
+): Promise<QueryResult> {
+  if (!artistId) return { items: [], totalRecordCount: 0 };
+  const sort: ItemQuery = {
+    includeItemTypes: ['Audio'],
+    enableTotalRecordCount: true,
+    recursive: true,
+    sortBy: ['PlayCount', 'SortName'],
+    sortOrder: 'Descending',
+    startIndex,
+    limit,
+  };
+  const byAlbumArtist = await api.items({ ...sort, albumArtistIds: [artistId] }, opts);
+  const albumArtistItems = (byAlbumArtist.items ?? []).filter(isAudio);
+  if (albumArtistItems.length || startIndex > 0 || (byAlbumArtist.totalRecordCount ?? 0) > 0) {
+    return { ...byAlbumArtist, items: albumArtistItems };
   }
-  return tracks.slice(0, limit);
+  const byArtist = await api.items({ ...sort, artistIds: [artistId] }, opts);
+  return { ...byArtist, items: (byArtist.items ?? []).filter(isAudio) };
 }
 
 export async function fetchArtistTracks(
@@ -135,34 +163,23 @@ export async function fetchArtistTracks(
   limit: number,
   opts?: SignalOpts
 ): Promise<BaseItem[]> {
-  if (!artistId) return [];
-  const byAlbumArtist = await api.items(
-    {
-      albumArtistIds: [artistId],
-      includeItemTypes: ['Audio'],
-      recursive: true,
-      sortBy: ['PlayCount', 'SortName'],
-      sortOrder: 'Descending',
-      limit,
-    },
+  const page = await fetchArtistTrackPage(api, artistId, 0, limit, opts);
+  return (page.items ?? []).slice(0, limit);
+}
+
+export async function fetchPlaylistTrackPage(
+  api: JellyfinApi,
+  playlistId: string,
+  startIndex: number,
+  limit: number,
+  opts?: SignalOpts
+): Promise<QueryResult> {
+  const result = await api.playlistItems(
+    playlistId,
+    { limit, startIndex, enableTotalRecordCount: true },
     opts
   );
-  let tracks = (byAlbumArtist.items ?? []).filter(isAudio);
-  if (!tracks.length) {
-    const byArtist = await api.items(
-      {
-        artistIds: [artistId],
-        includeItemTypes: ['Audio'],
-        recursive: true,
-        sortBy: ['PlayCount', 'SortName'],
-        sortOrder: 'Descending',
-        limit,
-      },
-      opts
-    );
-    tracks = (byArtist.items ?? []).filter(isAudio);
-  }
-  return tracks.slice(0, limit);
+  return { ...result, items: (result.items ?? []).filter(isAudio) };
 }
 
 export async function fetchPlaylistTracks(
@@ -171,8 +188,8 @@ export async function fetchPlaylistTracks(
   limit: number,
   opts?: SignalOpts
 ): Promise<BaseItem[]> {
-  const result = await api.playlistItems(playlistId, { limit }, opts);
-  return (result.items ?? []).filter(isAudio).slice(0, limit);
+  const page = await fetchPlaylistTrackPage(api, playlistId, 0, limit, opts);
+  return (page.items ?? []).slice(0, limit);
 }
 
 export const SEARCH_ALL_TYPES = ['Audio', 'MusicArtist', 'MusicAlbum', 'Playlist', 'MusicGenre'] as const;

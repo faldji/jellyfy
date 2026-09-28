@@ -1,22 +1,41 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { GestureDetector } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useCreatePlaylist } from '@/api/hooks';
 import { radii, spacing } from '@/constants/theme';
+import { SheetBackdrop, SheetGrabber, SheetSurface, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
 import { useUi } from '@/store/ui';
 import { useColors } from '@/theme/useColors';
 
-export function CreatePlaylistForm({ onClose }: { onClose: () => void }) {
+export function CreatePlaylistForm({ onClose, interceptBack = false }: { onClose: () => void; interceptBack?: boolean }) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const c = useColors();
   const create = useCreatePlaylist();
   const [name, setName] = useState('');
+  const pendingId = useRef<string | null>(null);
+  const { gesture, style, backdropStyle, dismiss } = useSwipeDownClose(
+    () => {
+      const id = pendingId.current;
+      pendingId.current = null;
+      onClose();
+      if (id) router.push({ pathname: '/playlist/[id]', params: { id } });
+    },
+    { animateIn: true, interceptBack }
+  );
 
   return (
-    <View style={[styles.screen, { backgroundColor: c.bg, paddingTop: insets.top + 12 }]}>
+    <View style={styles.overlay}>
+      <SheetBackdrop style={backdropStyle} />
+      <SheetSurface wash={c.bg} style={[styles.sheet, style, { paddingBottom: insets.bottom + 24 }]}>
+      <GestureDetector gesture={gesture}>
+        <View>
+          <SheetGrabber color={c.textMuted} />
+        </View>
+      </GestureDetector>
       <KeyboardAvoidingView
         style={styles.fill}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -30,7 +49,7 @@ export function CreatePlaylistForm({ onClose }: { onClose: () => void }) {
           style={[styles.input, { color: c.text, borderBottomColor: c.text }]}
         />
         <View style={styles.actions}>
-          <Pressable onPress={onClose} style={[styles.cancel, { borderColor: c.textMuted }]}>
+          <Pressable onPress={dismiss} style={[styles.cancel, { borderColor: c.textMuted }]}>
             <Text style={[styles.cancelText, { color: c.text }]}>Cancel</Text>
           </Pressable>
           <Pressable
@@ -40,8 +59,8 @@ export function CreatePlaylistForm({ onClose }: { onClose: () => void }) {
                 { name: trimmed },
                 {
                   onSuccess: (result) => {
-                    onClose();
-                    if (result.id) router.push({ pathname: '/playlist/[id]', params: { id: result.id } });
+                    pendingId.current = result.id ?? null;
+                    dismiss();
                   },
                 }
               );
@@ -51,6 +70,7 @@ export function CreatePlaylistForm({ onClose }: { onClose: () => void }) {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+      </SheetSurface>
     </View>
   );
 }
@@ -62,7 +82,8 @@ export function CreatePlaylistHost() {
   return (
     <Modal
       visible={open}
-      animationType="slide"
+      transparent
+      animationType="none"
       onRequestClose={close}
       presentationStyle="overFullScreen"
       statusBarTranslucent>
@@ -72,8 +93,9 @@ export function CreatePlaylistHost() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1 },
-  fill: { flex: 1, paddingHorizontal: spacing.xl, justifyContent: 'center' },
+  overlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'transparent' },
+  sheet: { paddingTop: 8, paddingHorizontal: spacing.xl },
+  fill: { paddingBottom: 12 },
   heading: { fontSize: 22, fontWeight: '800', textAlign: 'center', marginBottom: 36 },
   input: {
     fontSize: 32,

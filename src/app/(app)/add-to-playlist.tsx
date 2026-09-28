@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -11,10 +11,10 @@ import {
   View,
 } from 'react-native';
 import { GestureDetector } from 'react-native-gesture-handler';
-import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { musicScope, useAddToPlaylist, useCreatePlaylist, useItems, useMusicParent } from '@/api/hooks';
+import { musicScope, useAddToPlaylist, useCreatePlaylist, useInfiniteItems, useMusicParent } from '@/api/hooks';
+import { COLLECTION_PAGE } from '@/api/paging';
 import { CoverArt } from '@/components/CoverArt';
 import { EmptyState } from '@/components/EmptyState';
 import { IconButton } from '@/components/IconButton';
@@ -22,7 +22,8 @@ import { SearchField } from '@/components/SearchField';
 import { TrackRow } from '@/components/TrackRow';
 import { spacing } from '@/constants/theme';
 import { useDebounced } from '@/hooks/use-debounce';
-import { SheetGrabber, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
+import { SheetBackdrop, SheetGrabber, SheetSurface, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
+import { nearListEnd } from '@/lib/near-list-end';
 import { closeOverlay } from '@/lib/navigation';
 import { usePlayer } from '@/store/player';
 import { useColors } from '@/theme/useColors';
@@ -40,30 +41,36 @@ export default function AddToPlaylistScreen() {
   const q = useDebounced(term.trim(), 250);
   const trackIds = (ids ?? '').split(',').filter(Boolean);
   const close = () => closeOverlay(router);
-  const { gesture, style } = useSwipeDownClose(close);
+  const { gesture, style, backdropStyle, dismiss } = useSwipeDownClose(close, {
+    animateIn: true,
+    interceptBack: true,
+  });
 
-  const playlists = useItems(
+  const playlists = useInfiniteItems(
     ['user-playlists'],
     {
       includeItemTypes: ['Playlist'],
       sortBy: ['SortName'],
-      limit: 200,
       ...musicScope(parentId),
     },
-    !playlistId
+    { enabled: !playlistId, pageSize: COLLECTION_PAGE }
+  );
+  const playlistRows = useMemo(
+    () => playlists.data?.pages.flatMap((page) => page.items ?? []) ?? [],
+    [playlists.data]
   );
 
-  const songs = useItems(
+  const songs = useInfiniteItems(
     ['add-songs', playlistId, q],
     {
       includeItemTypes: ['Audio'],
       searchTerm: q || undefined,
       sortBy: q ? ['SortName'] : ['Random'],
-      limit: 60,
       ...musicScope(parentId),
     },
-    Boolean(playlistId)
+    { enabled: Boolean(playlistId), pageSize: COLLECTION_PAGE }
   );
+  const songRows = useMemo(() => songs.data?.pages.flatMap((page) => page.items ?? []) ?? [], [songs.data]);
 
   const header = (
     <GestureDetector gesture={gesture}>
@@ -73,7 +80,7 @@ export default function AddToPlaylistScreen() {
           <IconButton
             name={playlistId ? 'chevron-back' : 'close'}
             accessibilityLabel={playlistId ? 'Back' : 'Close'}
-            onPress={close}
+            onPress={dismiss}
           />
           <Text style={[styles.title, { color: c.text }]}>
             {playlistId ? 'Add to this playlist' : 'Add to playlist'}
@@ -85,9 +92,11 @@ export default function AddToPlaylistScreen() {
   );
 
   if (playlistId) {
-    const items = songs.data?.items ?? [];
+    const items = songRows;
     return (
-      <Animated.View style={[styles.screen, style, { backgroundColor: c.bg, paddingTop: insets.top + 2 }]}>
+      <View style={styles.overlay}>
+      <SheetBackdrop style={backdropStyle} />
+      <SheetSurface wash={c.bg} style={[styles.screen, style, { paddingTop: insets.top + 2 }]}>
         <KeyboardAvoidingView
           style={styles.fill}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -102,14 +111,18 @@ export default function AddToPlaylistScreen() {
           </View>
           <ScrollView
             keyboardShouldPersistTaps="handled"
-            contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+            contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+            scrollEventThrottle={16}
+            onScroll={(event) => {
+              if (nearListEnd(event) && songs.hasNextPage && !songs.isFetchingNextPage) void songs.fetchNextPage();
+            }}>
             {songs.isLoading ? (
               <ActivityIndicator color={c.text} style={{ marginTop: 32 }} />
             ) : items.length === 0 ? (
               <EmptyState title={q ? `No songs for “${q}”` : 'No songs'} subtitle="Try another search." />
             ) : (
-              items.map((item) => (
-                <View key={item.id} style={styles.suggestRow}>
+              items.map((item, index) => (
+                <View key={`${item.id}-${index}`} style={styles.suggestRow}>
                   <View style={{ flex: 1 }}>
                     <TrackRow
                       item={item}
@@ -125,43 +138,57 @@ export default function AddToPlaylistScreen() {
                 </View>
               ))
             )}
+            {songs.isFetchingNextPage ? <ActivityIndicator color={c.text} style={{ marginVertical: 16 }} /> : null}
           </ScrollView>
         </KeyboardAvoidingView>
-      </Animated.View>
+      </SheetSurface>
+      </View>
     );
   }
 
   return (
-    <Animated.View style={[styles.screen, style, { backgroundColor: c.bg, paddingTop: insets.top + 2 }]}>
+    <View style={styles.overlay}>
+      <SheetBackdrop style={backdropStyle} />
+      <SheetSurface wash={c.bg} style={[styles.screen, style, { paddingTop: insets.top + 2 }]}>
       {header}
       <Pressable
         style={styles.row}
         onPress={() => {
-          create.mutate({ name: 'New playlist', ids: trackIds }, { onSuccess: close });
+          create.mutate({ name: 'New playlist', ids: trackIds }, { onSuccess: dismiss });
         }}>
         <View style={[styles.new, { backgroundColor: c.elevate }]}>
           <Text style={[styles.plus, { color: c.text }]}>+</Text>
         </View>
         <Text style={[styles.name, { color: c.text }]}>New playlist</Text>
       </Pressable>
-      <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
-        {(playlists.data?.items ?? []).map((playlist) => (
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+        scrollEventThrottle={16}
+        onScroll={(event) => {
+          if (nearListEnd(event) && playlists.hasNextPage && !playlists.isFetchingNextPage) {
+            void playlists.fetchNextPage();
+          }
+        }}>
+        {playlistRows.map((playlist) => (
           <Pressable
             key={playlist.id}
             style={styles.row}
             onPress={() => {
-              add.mutate({ playlistId: playlist.id, ids: trackIds }, { onSuccess: close });
+              add.mutate({ playlistId: playlist.id, ids: trackIds }, { onSuccess: dismiss });
             }}>
             <CoverArt item={playlist} size={52} rounded="square" />
             <Text style={[styles.name, { color: c.text }]}>{playlist.name}</Text>
           </Pressable>
         ))}
+        {playlists.isFetchingNextPage ? <ActivityIndicator color={c.text} style={{ marginVertical: 16 }} /> : null}
       </ScrollView>
-    </Animated.View>
+      </SheetSurface>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: 'transparent' },
   screen: { flex: 1 },
   fill: { flex: 1 },
   nav: {

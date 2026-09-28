@@ -36,7 +36,7 @@ Do not log tokens or the full Authorization header.
 3. Keys from `queryKeys` in `src/api/query-keys.ts`. Keep `userId` after the resource prefix.
 4. Mutations that change library data call `invalidateLibraryQueries(client)`. Favorites use `invalidateAfterFavorite`, which matches only `FAVORITE_LIST_LABELS` or an `ItemQuery.filters` that includes `IsFavorite`. Names like `fans-also-like` do not match.
 5. In-flight GETs are keyed by `userId + server + path + query` (`getShareKey`). One waiter leaving does not abort the others. When the last waiter leaves, the wire request stays up for 50ms so play can join, then it is cancelled.
-6. Collection play must go through `fetchAlbumTracks` / `fetchArtistTracks` / `fetchPlaylistTracks` (or the matching hook) so the engine can reuse the React Query cache. Library Artists uses `fetchLibraryArtists` (do not send `includeItemTypes=MusicArtist` to `/Artists/AlbumArtists`).
+6. Collection play must go through `fetchAlbumTracks` / `fetchArtistTracks` / `fetchPlaylistTracks` (or the matching hook) so the engine can reuse the React Query cache. Screens page those lists at `COLLECTION_PAGE` (40) with `useAlbumTrackPages`, `useArtistTrackPages`, `usePlaylistTrackPages`, and `useInfiniteItems`. The play fetch asks for `playAllLimit` and stores it on the `play` query key. A later page does not repeat the page-0 parent / album-artist fallback. Playlist rename omits `Ids` until every page is loaded, because `POST /Playlists/{id}` with `Ids` replaces the membership. Library Artists uses `fetchLibraryArtists` (do not send `includeItemTypes=MusicArtist` to `/Artists/AlbumArtists`).
 7. Pass React Query's `signal` into `createApi` reads. Search and screen changes cancel the previous request.
 
 ```ts
@@ -53,6 +53,8 @@ import { queryKeys, invalidateLibraryQueries } from '@/api/query-keys';
 | `downloadUrl` | `GET /Items/{id}/Download?api_key=`. Native only. |
 
 Do not invent a third stream path. `/Audio/{id}/stream.mp3` ignores `startTimeTicks` and breaks seek. See comments on `streamUrl`.
+
+A transcoded stream's player clock starts at 0. Wall time is `startOffset` plus that clock. When the player duration is unset, the seek bar uses the item's `runTimeTicks`.
 
 ## Smart Recommendations
 

@@ -169,7 +169,7 @@ export function createApi(session: Session) {
 
     playlistItems(
       playlistId: string,
-      query: { limit?: number; startIndex?: number } = {},
+      query: { limit?: number; startIndex?: number; enableTotalRecordCount?: boolean } = {},
       opts?: FetchExtra
     ) {
       return get<QueryResult>(

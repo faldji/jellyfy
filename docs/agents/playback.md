@@ -35,13 +35,13 @@ Internal: `source` (canonical list) + `order` (permutation) + `index` into `orde
 
 Snapshot `queue` is `order.map(i => source[i])`. Shuffle rebuilds `order` around the current source index. Repeat is `off | all | one`. `player.loop` stays false; repeat-one is seek-to-0 in the engine.
 
-On-screen `playItems(list, index)` uses the **loaded** list (album hook limit 500, infinite likes pages, …). The play-all cap applies to `playCollection`, `tracksForItem`, `tracksForMix`, and handoff - not every row tap.
+Album, playlist, and artist track lists, genre albums, the library, and add-to-playlist load 40 items at a time (`COLLECTION_PAGE`). Likes pages at 50. Home rails keep their configured limits. A row plays the list already loaded. Play and shuffle on a collection header queue up to `playAllLimit` (hard 2000). Shuffle draws that cap from the loaded list, not from its prefix. If the list is still incomplete, the header asks the server for the cap instead of playing only the visible page. Pressing play on the collection that is already active resumes. Artist popular rows are the top of the first track page.
 
 ## Cache
 
-`playItem` / `tracksForItem` read React Query first (`album-tracks`, `artist-tracks`, `playlist-items`). Opening a collection and pressing play should not fetch tracks twice.
+`playItem` / `tracksForItem` read the paged React Query cache first (`pages`), then a previous play of the same cap (`play`). Opening a collection and pressing play should not fetch tracks twice when those pages already cover the cap or the collection has ended.
 
-Progress POSTs omit `nowPlayingQueue`. Start and stop still send the queue. SR does not get periodic PLAY_PROGRESS.
+Periodic progress omits `nowPlayingQueue`. Start, stop, and a shuffle that changes the order send the queue. SR does not get periodic PLAY_PROGRESS.
 
 ## Load / seek
 
@@ -58,11 +58,25 @@ Seek: native `seekTo` when the player duration matches the item (or the playhead
 
 `src/playback/advance.ts` owns completion + next-index. The engine does **not** treat a stalled playhead as the end of a track.
 
-Native `playbackStatusUpdate` with `didJustFinish` (or `playbackState === 'ended'`) is the completion signal. expo-audio 57 only emits periodic ticks while `playing` is true, so a JS position timer cannot see the end after ExoPlayer has already stopped â€” that path fails on an Android lock screen.
+Native `playbackStatusUpdate` with `didJustFinish` (or `playbackState === 'ended'`) is the completion signal. expo-audio 57 only emits periodic ticks while `playing` is true, so a JS position timer cannot see the end after ExoPlayer has already stopped. That path fails on an Android lock screen.
 
-A `CompletionGate` (`loadGen` + item id) makes advancement idempotent: duplicate `didJustFinish`, a stale complete from the previous source, and manual next racing auto-complete cannot skip a track. `resetPlayhead` is only for `replace()` keeping the old `currentTime` at the start of a track; it must not veto a native complete.
+A `CompletionGate` (`loadGen` + item id) makes advancement idempotent: duplicate `didJustFinish`, a stale complete from the previous source, and manual next racing auto-complete cannot skip a track. Accept a completion only after this load has been heard playing, so a stale `ended` from `replace()` cannot skip again. `resetPlayhead` hides a `replace()` status that still carries the previous item's `currentTime`. Do not `seekTo(0)` on that reading. The seek rebuffers and restarts the new item. It must not veto a native complete.
 
-`player.loop` stays false. Repeat-one is seek-to-0. Lock-screen/headset next uses `userNext()` (skips even on repeat-one). expo-audio 57.0.4 `AudioPlayer` lock-screen buttons are play/pause (optional Â±10s seek); they are not a native playlist skip.
+`player.loop` stays false. Repeat-one is seek-to-0. Lock-screen and headset next call `userNext()` (skips even on repeat-one). Previous calls `previous()` (restart when the playhead is past 3 seconds, otherwise the previous item).
+
+## Lock screen
+
+Stock expo-audio 57.0.5 is play/pause and optional ±10s. `patches/expo-audio+57.0.5.patch` is applied on `postinstall` and adds next, previous, shuffle, repeat, and a timed seek bar. `package.json` `expo.autolinking.buildFromSource` includes `expo-audio`. Without that, Android links the precompiled package and ignores the patch. Rebuild with `npx expo run:android` or `npx expo run:ios` after pulling it. Expo Go cannot show the controls.
+
+The patch emits `onRemoteNextTrack`, `onRemotePreviousTrack`, `onRemoteShuffle`, `onRemoteRepeat`, and `onRemoteSeek`. The engine owns the queue. On Android 13 and newer the shade and lock screen only draw standard player commands (`SEEK_TO_NEXT`, `SEEK_TO_PREVIOUS`, `SET_SHUFFLE_MODE`, `SET_REPEAT_MODE`, `SEEK_IN_CURRENT_MEDIA_ITEM`). Custom session commands are not drawn.
+
+Jellyfin transcodes often leave the player duration unset, which grays out the system seek bar. Publish `displayDuration()` (`runTimeTicks`) and `positionOffsetMs` (`startOffset`) once per item. The in-app bar uses that same duration. A transcoded clock starts at 0; wall time is the offset plus the clock.
+
+Notification icons are monochrome drawables. The system tints every transport button one color, so shuffle and repeat state is the shape, not `accent`. Do not colorize the notification.
+
+`classifyRemoteSeek` ignores a system seek to 0, or back to the position just left, in the first seconds after open. Those seeks must not call `loadCurrent`. A real scrub seeks natively when the player duration matches the item. A transcode reopens that item once. Repeat one still replays in the engine. Lock-screen next still skips. Shuffle rebuilds `order` and posts `nowPlayingQueue` once. Repeat posts `repeatMode` on the next progress. SR has no shuffle or repeat event.
+
+Web `media-session.ts` binds play, pause, seek, next, and previous, and clears the ±10s actions. Shuffle and repeat stay in the page.
 
 ## Reporting
 
@@ -70,11 +84,14 @@ Serialized on `reportChain`.
 
 | When | Jellyfin | SR (if on) |
 |------|----------|------------|
-| First playing status | `reportPlaying` | `PLAY_START` |
-| ~10s while playing | `reportProgress` | `PLAY_PROGRESS` |
-| Pause / resume / seek / shuffle | `reportProgress` | `PAUSE` / `RESUME` |
-| Leave track | `reportStopped` | `PLAY_COMPLETE` or `SKIP` (`leaveEventType`) |
-| Repeat-one restart | progress | `REPLAY` |
+| First playing status | `reportPlaying` | `PLAY_START` (not gated on the Jellyfin response) |
+| About every 10s while playing | `reportProgress`. A progress post closer than 8s is dropped unless pause changed or the queue is included | none. Periodic `PLAY_PROGRESS` stays off |
+| Pause / resume, including the lock screen | `reportProgress` | `PAUSE` / `RESUME` |
+| Seek / lock-screen scrub | `reportProgress` | none |
+| Shuffle, including the lock screen | `reportProgress` with the new queue | none |
+| Repeat off / all / one, including the lock screen | `reportProgress` (`repeatMode`) | none |
+| Leave track, including lock-screen next and previous | `reportStopped` | `PLAY_COMPLETE` or `SKIP` (`leaveEventType`) |
+| Repeat-one restart | progress | `REPLAY`, then a later skip of that visit can still emit |
 
 Queue tail + `continueWithSr`: `fetchSrNext` + hydrate, append unseen ids.
 
@@ -84,7 +101,7 @@ Queue tail + `continueWithSr`: `fetchSrNext` + hydrate, append unseen ids.
 |---------|--------|-----|
 | Stream | original = static stream + `Authorization` | always universal MP3, token in query |
 | Downloads | yes | throw / hide in the sheet |
-| Lock screen | `setActiveForLockScreen` | `media-session.ts` next/prev only |
+| Lock screen | next, previous, seek, shuffle, repeat one/all/off | `media-session.ts` play, pause, seek, next, previous |
 | Extra `<audio>` | n/a | `silenceHtmlAudio` |
 
 ## Handoff

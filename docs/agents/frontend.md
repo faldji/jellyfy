@@ -50,7 +50,7 @@ Live palette: `src/theme/palettes.ts` → `resolveColors(themeId, accentId, syst
 | `overlay`, `tabBar`, `hairline` | Chrome |
 | `isDark` | Status bar / shadows |
 
-Prefer `c.*` over raw hex. Search browse tiles may keep category colors. Overlays on cover art may stay white-on-dark.
+Prefer `c.*` over raw hex. Search browse tiles may keep category colors. Overlays on cover art may stay white-on-dark. Lock-screen and notification buttons do not take `accent`. See `docs/agents/playback.md`.
 
 Spacing scale: `xs 4 / sm 8 / md 12 / lg 16 / xl 24 / xxl 32`. Radii: `sm 4 / md 8 / lg 12 / pill`. Prefer the scale over magic numbers when it already matches.
 
@@ -61,12 +61,12 @@ Spacing scale: `xs 4 / sm 8 / md 12 / lg 16 / xl 24 / xxl 32`. Radii: `sm 4 / md
 | `/(app)/(tabs)` | Home, Search, Library. Queue is a tab-bar button that opens the queue modal |
 | `/likes` | Liked Songs (not a tab) |
 | `/album/[id]`, `/artist/[id]`, `/playlist/[id]`, `/genre/[name]`, `/radio/[id]` | Details |
-| `/player`, `/queue`, `/add-to-playlist`, `/create-playlist` | Native stack modal (`slide_from_bottom`) |
+| `/player`, `/queue`, `/add-to-playlist`, `/create-playlist` | Transparent overlay. The sheet slides in JS |
 | `/downloads`, `/settings` | Stack |
 
 Auth gate: `(app)/_layout` → `/login`. Persistent chrome: `NowPlayingBar` + `AppTabBar` (hidden on player / playlist editors via `hideAppChrome`).
 
-`/player`, `/queue`, and `/add-to-playlist` are native stack modals. Create playlist and in-tree sheets (`ActionSheet`, `CreateSheet`, `LyricsCard`) use RN `Modal` from the app shell.
+Player, queue, add-to-playlist, and the create-playlist route are `transparentModal` with `animation: 'none'`. `useSwipeDownClose` slides the sheet over the screen underneath. Android back, the chevron, and a downward swipe share that slide. `SheetBackdrop` and `SheetSurface` frost that screen with `GlassSurface`. Create playlist from the shell, and lyrics, use the same slide inside a transparent RN `Modal`. After a manual lyrics scroll, the active line is followed again about 2.5s after the finger lifts. `ActionSheet` and `CreateSheet` stay in the app shell.
 
 New collection pages should use `useCollectionPlayback` and `useNowPlayingPadding()`.
 

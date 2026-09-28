@@ -82,6 +82,7 @@ export function emitNet(event: Omit<NetEvent, 'at' | 'action'> & { at?: number; 
     bytes: full.bytes,
     status: full.status,
     retries: full.retries,
+    ...(full.action ? { action: full.action } : {}),
   });
 }
 

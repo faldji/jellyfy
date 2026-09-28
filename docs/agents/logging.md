@@ -22,7 +22,7 @@ Do not add bare `console.*` in new app code. The logger is the one prefix (`[jel
 - Auth / attach / playback transitions that change behavior (`info` or `debug`)
 - Fallback paths (SR → Instant Mix, stream reopen) (`warn` / `info`)
 
-Skip: every React render, expected empty states, data the user already sees as a toast unless the log adds process-side detail.
+Skip: every React render, expected empty states, periodic playback position, data the user already sees as a toast unless the log adds process-side detail. HTTP `net` events are the playback trace.
 
 ## Message shape
 

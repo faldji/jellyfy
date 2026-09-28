@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -10,7 +10,7 @@ import {
   useItem,
   useItems,
   useMusicParent,
-  usePlaylistItems,
+  usePlaylistTrackPages,
   useRenamePlaylist,
 } from '@/api/hooks';
 import { ActionSheet } from '@/components/ActionSheet';
@@ -23,6 +23,7 @@ import { useTrackActions } from '@/components/useTrackActions';
 import { UserAvatar } from '@/components/UserAvatar';
 import { radii, spacing } from '@/constants/theme';
 import { artistLine } from '@/lib/format';
+import { nearListEnd } from '@/lib/near-list-end';
 import { closeOverlay } from '@/lib/navigation';
 import { useNowPlayingPadding } from '@/components/MiniPlayer';
 import { useCollectionPlayback } from '@/hooks/use-collection-playback';
@@ -37,9 +38,9 @@ export default function PlaylistScreen() {
   const c = useColors();
   const userName = useAuth((s) => s.session?.userName);
   const playlist = useItem(id);
-  const tracks = usePlaylistItems(id);
+  const tracks = usePlaylistTrackPages(id);
   const parentId = useMusicParent();
-  const items = tracks.data ?? [];
+  const items = useMemo(() => tracks.data?.pages.flatMap((page) => page.items ?? []) ?? [], [tracks.data]);
   const [suggestReady, setSuggestReady] = useState(false);
   useEffect(() => {
     if (!items.length) return;
@@ -61,6 +62,7 @@ export default function PlaylistScreen() {
   const rename = useRenamePlaylist();
   const remove = useDeletePlaylist();
   const playItems = usePlayer((s) => s.playItems);
+  const playItem = usePlayer((s) => s.playItem);
   const actions = useTrackActions({ playlistId: id });
   const collection = useCollectionPlayback(id, items, playlist.data);
   const bottomPad = useNowPlayingPadding();
@@ -73,7 +75,11 @@ export default function PlaylistScreen() {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: c.bg }}
-      contentContainerStyle={{ paddingTop: insets.top + 4, paddingBottom: bottomPad }}>
+      contentContainerStyle={{ paddingTop: insets.top + 4, paddingBottom: bottomPad }}
+      scrollEventThrottle={16}
+      onScroll={(event) => {
+        if (nearListEnd(event) && tracks.hasNextPage && !tracks.isFetchingNextPage) void tracks.fetchNextPage();
+      }}>
       <View style={styles.nav}>
         <IconButton name="chevron-back" accessibilityLabel="Back" onPress={() => closeOverlay(router)} />
       </View>
@@ -98,8 +104,22 @@ export default function PlaylistScreen() {
       <CollectionActions
         playing={collection.playing}
         busy={collection.busy}
-        onPlay={collection.play}
-        onShuffle={collection.shuffle}
+        onPlay={() => {
+          if (collection.busy) return;
+          if (collection.active || (!tracks.hasNextPage && items.length)) {
+            collection.play();
+            return;
+          }
+          if (playlist.data) void playItem(playlist.data, { contextId: id });
+        }}
+        onShuffle={() => {
+          if (collection.busy) return;
+          if (!tracks.hasNextPage && items.length) {
+            collection.shuffle();
+            return;
+          }
+          if (playlist.data) void playItem(playlist.data, { shuffle: true, contextId: id });
+        }}
       />
 
       {canEdit ? (
@@ -112,13 +132,16 @@ export default function PlaylistScreen() {
 
       {items.map((item, index) => (
         <TrackRow
-          key={`${item.id}-${item.playlistItemId ?? index}`}
+          key={`${item.playlistItemId || item.id}-${index}`}
           item={item}
           subtitle={artistLine(item)}
           onPress={() => void playItems(items, index, { contextId: id })}
           onMore={() => actions.open(item)}
         />
       ))}
+      {tracks.isLoading || tracks.isFetchingNextPage ? (
+        <ActivityIndicator color={c.text} style={{ marginVertical: 20 }} />
+      ) : null}
 
       {canEdit && suggested.data?.items?.length ? (
         <View style={{ marginTop: 24 }}>
@@ -200,7 +223,11 @@ export default function PlaylistScreen() {
                   const name = nextName.trim();
                   if (!id || !name) return;
                   rename.mutate(
-                    { playlistId: id, name, ids: items.map((item) => item.id) },
+                    {
+                      playlistId: id,
+                      name,
+                      ...(tracks.hasNextPage ? {} : { ids: items.map((item) => item.id) }),
+                    },
                     { onSuccess: () => setRenaming(false) }
                   );
                 }}

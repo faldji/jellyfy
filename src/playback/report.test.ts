@@ -15,11 +15,13 @@ describe('buildPlayingBody', () => {
     queue: [{ id: 't1' }, { id: 't2' }, { id: 't3' }],
   };
 
-  it('includes the queue only on start', () => {
+  it('includes the queue on start and on a shuffle update, not on a periodic progress', () => {
     const start = buildPlayingBody({ ...base, kind: 'start' });
     const progress = buildPlayingBody({ ...base, kind: 'progress' });
+    const shuffled = buildPlayingBody({ ...base, kind: 'progress', includeQueue: true });
     expect(start.nowPlayingQueue).toEqual(base.queue);
     expect(progress.nowPlayingQueue).toBeUndefined();
+    expect(shuffled.nowPlayingQueue).toEqual(base.queue);
   });
 
   it('keeps start and progress item ids independent so a late progress cannot retarget a new track', () => {

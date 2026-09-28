@@ -32,16 +32,10 @@ export function useSmoothProgress(
     running.current = true;
     cancelAnimation(progress);
     progress.value = target;
-    progress.value = withTiming(
-      1,
-      {
-        duration: Math.max(0, duration - position) * 1000,
-        easing: Easing.linear,
-      },
-      (finished) => {
-        if (finished) running.current = false;
-      }
-    );
+    progress.value = withTiming(1, {
+      duration: Math.max(0, duration - position) * 1000,
+      easing: Easing.linear,
+    });
   }, [duration, frozen, playing, position, progress]);
 
   return progress;

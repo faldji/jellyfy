@@ -1,14 +1,13 @@
 import { useRouter } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { GestureDetector } from 'react-native-gesture-handler';
-import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { EmptyState } from '@/components/EmptyState';
 import { IconButton } from '@/components/IconButton';
 import { TrackRow } from '@/components/TrackRow';
 import { spacing } from '@/constants/theme';
-import { SheetGrabber, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
+import { SheetBackdrop, SheetGrabber, SheetSurface, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
 import { closeOverlay } from '@/lib/navigation';
 import { usePlayer } from '@/store/player';
 import { useColors } from '@/theme/useColors';
@@ -26,15 +25,20 @@ export default function QueueScreen() {
   const move = usePlayer((s) => s.move);
   const nextUp = queue.slice(index + 1);
   const close = () => closeOverlay(router);
-  const { gesture, style } = useSwipeDownClose(close);
+  const { gesture, style, backdropStyle, dismiss } = useSwipeDownClose(close, {
+    animateIn: true,
+    interceptBack: true,
+  });
 
   return (
-    <Animated.View style={[styles.screen, style, { backgroundColor: c.bg, paddingTop: insets.top + 2 }]}>
+    <View style={styles.overlay}>
+    <SheetBackdrop style={backdropStyle} />
+    <SheetSurface wash={c.bg} style={[styles.screen, style, { paddingTop: insets.top + 2 }]}>
       <GestureDetector gesture={gesture}>
         <View>
           <SheetGrabber color={c.textMuted} />
           <View style={styles.nav}>
-            <IconButton name="chevron-down" accessibilityLabel="Close" onPress={close} />
+            <IconButton name="chevron-down" accessibilityLabel="Close" onPress={dismiss} />
             <Text style={[styles.title, { color: c.text }]}>Queue</Text>
             <View style={{ width: 24 }} />
           </View>
@@ -95,11 +99,13 @@ export default function QueueScreen() {
           </>
         )}
       </ScrollView>
-    </Animated.View>
+    </SheetSurface>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: 'transparent' },
   screen: { flex: 1 },
   fill: { flex: 1 },
   nav: {

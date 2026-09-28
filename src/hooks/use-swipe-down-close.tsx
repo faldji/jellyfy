@@ -1,8 +1,8 @@
-import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, View, useWindowDimensions } from 'react-native';
+import { useFocusEffect, useNavigation } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { StyleSheet, View, useWindowDimensions, type StyleProp, type ViewStyle } from 'react-native';
 import { Gesture } from 'react-native-gesture-handler';
-import {
+import Animated, {
   Easing,
   runOnJS,
   useAnimatedScrollHandler,
@@ -12,14 +12,25 @@ import {
   withTiming,
 } from 'react-native-reanimated';
 
+import { GlassSurface } from '@/components/GlassSurface';
+import { useColors } from '@/theme/useColors';
+
 const SNAP = { damping: 26, stiffness: 280, mass: 0.85 };
 const OUT = { duration: 280, easing: Easing.bezier(0.32, 0.72, 0, 1) };
 const IN = { duration: 420, easing: Easing.bezier(0.2, 0.85, 0.2, 1) };
 
 type Options = {
   active?: boolean;
-  /** Drive the sheet ourselves (transparent modal). */
+  /** Slide the sheet over the screen underneath. The route must be a transparent modal. */
   animateIn?: boolean;
+  /** Android back follows the same slide instead of popping onto a black card. */
+  interceptBack?: boolean;
+};
+
+export const sheetChrome = {
+  borderTopLeftRadius: 22,
+  borderTopRightRadius: 22,
+  overflow: 'hidden' as const,
 };
 
 /** Swipe down to dismiss a sheet that uses a downward close control. */
@@ -27,11 +38,14 @@ export function useSwipeDownClose(onClose: () => void, options: boolean | Option
   const opts: Options = typeof options === 'boolean' ? { active: options } : options;
   const active = opts.active ?? true;
   const animateIn = Boolean(opts.animateIn);
+  const interceptBack = Boolean(opts.interceptBack);
+  const navigation = useNavigation();
   const { height } = useWindowDimensions();
   const sheetY = useSharedValue(animateIn ? height : 0);
   const scrollY = useSharedValue(0);
   const dragging = useSharedValue(0);
   const onCloseRef = useRef(onClose);
+  const leaving = useRef(false);
   onCloseRef.current = onClose;
   const finish = useCallback(() => onCloseRef.current(), []);
 
@@ -42,6 +56,8 @@ export function useSwipeDownClose(onClose: () => void, options: boolean | Option
   }, [finish, height, sheetY]);
 
   const dismiss = useCallback(() => {
+    if (leaving.current) return;
+    leaving.current = true;
     if (animateIn) {
       slideOut();
       return;
@@ -49,21 +65,34 @@ export function useSwipeDownClose(onClose: () => void, options: boolean | Option
     finish();
   }, [animateIn, finish, slideOut]);
 
-  const playIn = useCallback(() => {
-    if (!active) return;
+  useEffect(() => {
+    if (!interceptBack) return;
+    const sub = navigation.addListener('beforeRemove', (event) => {
+      if (leaving.current) return;
+      event.preventDefault();
+      dismiss();
+    });
+    return () => sub();
+  }, [dismiss, interceptBack, navigation]);
+
+  useEffect(() => {
+    if (!active) {
+      leaving.current = false;
+      if (animateIn) sheetY.value = height;
+      return;
+    }
+    leaving.current = false;
     if (animateIn) {
+      sheetY.value = height;
       sheetY.value = withTiming(0, IN);
       return;
     }
     sheetY.value = 0;
-  }, [active, animateIn, sheetY]);
-
-  useEffect(() => {
-    playIn();
-  }, [playIn]);
+  }, [active, animateIn, height, sheetY]);
 
   useFocusEffect(
     useCallback(() => {
+      leaving.current = false;
       // Reused native-stack screens keep the last translateY (off-screen after dismiss).
       if (!active || !animateIn) return;
       if (sheetY.value > 8) sheetY.value = withTiming(0, IN);
@@ -127,6 +156,35 @@ export function useSwipeDownClose(onClose: () => void, options: boolean | Option
   }));
 
   return { gesture, createHandle, style, backdropStyle, dismiss, onScroll, scrollY, sheetY };
+}
+
+export function SheetBackdrop({ style }: { style?: StyleProp<ViewStyle> | object }) {
+  const c = useColors();
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, style]}>
+      <GlassSurface intensity={18} style={StyleSheet.absoluteFill} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: c.overlay, opacity: 0.4 }]} />
+    </Animated.View>
+  );
+}
+
+/** Sheet panel with a light frost so the page underneath stays faintly visible. */
+export function SheetSurface({
+  wash,
+  style,
+  children,
+}: {
+  wash: string;
+  style?: StyleProp<ViewStyle> | object;
+  children: ReactNode;
+}) {
+  return (
+    <Animated.View style={[sheetChrome, { backgroundColor: 'transparent' }, style]}>
+      <GlassSurface intensity={22} style={StyleSheet.absoluteFill} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: wash, opacity: 0.7 }]} />
+      {children}
+    </Animated.View>
+  );
 }
 
 export function SheetGrabber({ color }: { color: string }) {

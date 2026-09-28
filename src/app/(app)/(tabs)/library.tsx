@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { musicScope, useInfiniteItems, useMusicParent } from '@/api/hooks';
+import { COLLECTION_PAGE } from '@/api/paging';
 import type { BaseItem, BaseItemKind, ItemSortBy, SortOrder } from '@/api/types';
 import { ActionSheet } from '@/components/ActionSheet';
 import { CoverArt } from '@/components/CoverArt';
@@ -50,7 +51,6 @@ const SORTS: { key: LibrarySort; label: string; hint: string }[] = [
   { key: 'artist', label: 'Artist', hint: 'Album artist, then title' },
 ];
 
-const PAGE_SIZE = 40;
 const GRID_GAP = 12;
 const GRID_PAD = spacing.lg;
 
@@ -115,7 +115,7 @@ export default function LibraryScreen() {
       filters: likedOnly ? ['IsFavorite'] : undefined,
       ...musicScope(parentId),
     },
-    { pageSize: PAGE_SIZE, source: artistsTab ? 'albumArtists' : 'items' }
+    { pageSize: COLLECTION_PAGE, source: artistsTab ? 'albumArtists' : 'items' }
   );
 
   const items = useMemo(

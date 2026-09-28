@@ -5,7 +5,7 @@ import { useSettings } from '@/store/settings';
 import { resolveColors, type ThemeColors } from '@/theme/palettes';
 
 export function useColors(): ThemeColors {
-  const themeId = useSettings((s) => s.themeId) ?? 'dark';
+  const themeId = useSettings((s) => s.themeId) ?? 'system';
   const accentId = useSettings((s) => s.accentId) ?? 'theme';
   const scheme = useColorScheme();
   return useMemo(
