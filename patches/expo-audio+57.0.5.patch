@@ -937,7 +937,10 @@ diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/Au
 diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
 --- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
 +++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
-@@ -519,6 +519,27 @@
+@@ -516,12 +516,34 @@
+       Function("updateLockScreenMetadata") { ref: AudioPlayer, metadata: Metadata ->
+         runOnMain {
+           ref.updateLockScreenMetadata(metadata)
          }
        }
  
@@ -962,13 +965,20 @@ diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/Au
 +          )
 +        }
 +      }
- 
++
        Function("clearLockScreenControls") { ref: AudioPlayer ->
          runOnMain {
+           ref.clearLockScreenControls()
+         }
+       }
+ 
 diff --git a/node_modules/expo-audio/ios/AudioModule.swift b/node_modules/expo-audio/ios/AudioModule.swift
 --- a/node_modules/expo-audio/ios/AudioModule.swift
 +++ b/node_modules/expo-audio/ios/AudioModule.swift
-@@ -269,6 +269,28 @@
+@@ -266,12 +266,35 @@
+         if player.isActiveForLockScreen {
+           player.metadata = metadata
+           MediaController.shared.updateNowPlayingInfo(for: player)
          }
        }
  
@@ -994,9 +1004,13 @@ diff --git a/node_modules/expo-audio/ios/AudioModule.swift b/node_modules/expo-a
 +        _ = iconColor
 +        _ = mutedColor
 +      }
- 
++
        Function("clearLockScreenControls") { (player: AudioPlayer) in
          if player.isActiveForLockScreen {
+           player.metadata = nil
+           player.isActiveForLockScreen = false
+           MediaController.shared.setActivePlayer(nil)
+         }
 diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_previous.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_previous.xml
 --- /dev/null
 +++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_previous.xml
