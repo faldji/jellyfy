@@ -2,12 +2,13 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 
 import { createApi } from '@/api/jellyfin';
 import {
-  fetchAlbumTracks,
-  fetchArtistTracks,
+  fetchAlbumTrackPage,
+  fetchArtistTrackPage,
   fetchLibraryArtists,
-  fetchPlaylistTracks,
+  fetchPlaylistTrackPage,
   fetchSearchAll,
 } from '@/api/library';
+import { COLLECTION_PAGE, nextStartIndex } from '@/api/paging';
 import { queryClient } from '@/api/query';
 import { invalidateAfterFavorite, invalidateLibraryQueries, queryKeys } from '@/api/query-keys';
 import { fetchSrHome, fetchSrRadio, hydrateSrTracks, isSrEnabled, postSrEventSafe, selectSrEnabled } from '@/api/sr';
@@ -49,8 +50,6 @@ export function useItems(
   });
 }
 
-const DEFAULT_PAGE = 40;
-
 export type InfiniteSource = 'items' | 'albumArtists' | 'artists';
 
 export function useInfiniteItems(
@@ -59,7 +58,7 @@ export function useInfiniteItems(
   options: { enabled?: boolean; pageSize?: number; source?: InfiniteSource } = {}
 ) {
   const api = useApi();
-  const pageSize = options.pageSize ?? DEFAULT_PAGE;
+  const pageSize = options.pageSize ?? COLLECTION_PAGE;
   const source = options.source ?? 'items';
   const enabled = options.enabled ?? true;
   return useInfiniteQuery({
@@ -107,30 +106,50 @@ export function useLatest(query: ItemQuery, enabled = true) {
   });
 }
 
-export function useAlbumTracks(id?: string, limit = 500) {
+function useCollectionPages(
+  queryKey: readonly unknown[],
+  enabled: boolean,
+  fetchPage: (startIndex: number, signal: AbortSignal) => Promise<QueryResult>
+) {
   const api = useApi();
-  return useQuery({
-    queryKey: queryKeys.albumTracks.detail(api?.session.userId, id),
-    queryFn: async ({ signal }) => {
-      if (!api || !id) throw new Error('Missing album');
-      return fetchAlbumTracks(api, id, limit, { signal });
-    },
-    enabled: Boolean(api && id),
+  return useInfiniteQuery({
+    queryKey,
+    enabled: Boolean(api) && enabled,
+    initialPageParam: 0,
     staleTime: 5 * 60_000,
+    queryFn: async ({ pageParam, signal }) => {
+      if (!api) throw new Error('Not signed in');
+      return fetchPage(pageParam, signal);
+    },
+    getNextPageParam: (_last, all) => nextStartIndex(all, COLLECTION_PAGE),
   });
 }
 
-export function useArtistTracks(id?: string, limit = 200) {
+export function useAlbumTrackPages(id?: string) {
   const api = useApi();
-  return useQuery({
-    queryKey: queryKeys.artistTracks.detail(api?.session.userId, id),
-    queryFn: async ({ signal }) => {
-      if (!api || !id) throw new Error('Missing artist');
-      return fetchArtistTracks(api, id, limit, { signal });
-    },
-    enabled: Boolean(api && id),
-    staleTime: 5 * 60_000,
-  });
+  return useCollectionPages(
+    queryKeys.albumTracks.pages(api?.session.userId, id, COLLECTION_PAGE),
+    Boolean(id),
+    (startIndex, signal) => fetchAlbumTrackPage(api!, id!, startIndex, COLLECTION_PAGE, { signal })
+  );
+}
+
+export function useArtistTrackPages(id?: string) {
+  const api = useApi();
+  return useCollectionPages(
+    queryKeys.artistTracks.pages(api?.session.userId, id, COLLECTION_PAGE),
+    Boolean(id),
+    (startIndex, signal) => fetchArtistTrackPage(api!, id!, startIndex, COLLECTION_PAGE, { signal })
+  );
+}
+
+export function usePlaylistTrackPages(id?: string) {
+  const api = useApi();
+  return useCollectionPages(
+    queryKeys.playlistItems.pages(api?.session.userId, id, COLLECTION_PAGE),
+    Boolean(id),
+    (startIndex, signal) => fetchPlaylistTrackPage(api!, id!, startIndex, COLLECTION_PAGE, { signal })
+  );
 }
 
 export function useSearchAll(term: string, enabled = true) {
@@ -286,18 +305,6 @@ export function useLyrics(id?: string, enabled = true) {
     retry: false,
     staleTime: 60_000,
     placeholderData: undefined,
-  });
-}
-
-export function usePlaylistItems(id?: string) {
-  const api = useApi();
-  return useQuery({
-    queryKey: queryKeys.playlistItems.detail(api?.session.userId, id),
-    queryFn: async ({ signal }) => {
-      if (!api || !id) throw new Error('Missing playlist');
-      return fetchPlaylistTracks(api, id, 2000, { signal });
-    },
-    enabled: Boolean(api && id),
   });
 }
 

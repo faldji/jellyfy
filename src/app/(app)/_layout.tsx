@@ -10,6 +10,13 @@ import { NowPlayingBar } from '@/components/MiniPlayer';
 import { useAuth } from '@/store/auth';
 import { useColors } from '@/theme/useColors';
 
+const overlayScreen = {
+  presentation: 'transparentModal' as const,
+  animation: 'none' as const,
+  contentStyle: { backgroundColor: 'transparent' },
+  gestureEnabled: false,
+};
+
 export default function AppGroupLayout() {
   const session = useAuth((s) => s.session);
   const c = useColors();
@@ -25,10 +32,10 @@ export default function AppGroupLayout() {
             animation: 'slide_from_right',
           }}>
           <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="player" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
-          <Stack.Screen name="queue" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
-          <Stack.Screen name="add-to-playlist" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
-          <Stack.Screen name="create-playlist" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
+          <Stack.Screen name="player" options={overlayScreen} />
+          <Stack.Screen name="queue" options={overlayScreen} />
+          <Stack.Screen name="add-to-playlist" options={overlayScreen} />
+          <Stack.Screen name="create-playlist" options={overlayScreen} />
         </Stack>
       </GlassProvider>
       <NowPlayingBar />

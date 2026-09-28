@@ -1,0 +1,1267 @@
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioRecords.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioRecords.kt
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioRecords.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioRecords.kt
+@@ -110,7 +110,18 @@
+ class AudioLockScreenOptions(
+   @Field val showSeekForward: Boolean,
+   @Field val showSeekBackward: Boolean,
+-  @Field val isLiveStream: Boolean? = null
++  @Field val isLiveStream: Boolean? = null,
++  @Field val showNextTrack: Boolean = false,
++  @Field val showPreviousTrack: Boolean = false,
++  @Field val showShuffle: Boolean = false,
++  @Field val showRepeat: Boolean = false,
++  @Field val shuffleEnabled: Boolean = false,
++  @Field val repeatMode: String = "off",
++  @Field val durationMs: Double = 0.0,
++  @Field val positionOffsetMs: Double = 0.0,
++  @Field val accentColor: String = "",
++  @Field val iconColor: String = "",
++  @Field val mutedColor: String = ""
+ ) : Record
+ 
+ enum class InterruptionMode(val value: String) : Enumerable {
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+@@ -15,6 +15,8 @@
+ import android.os.IBinder
+ import androidx.annotation.OptIn
+ import androidx.core.app.NotificationCompat
++import androidx.media3.common.C
++import androidx.media3.common.FlagSet
+ import androidx.media3.common.ForwardingPlayer
+ import androidx.media3.common.Player
+ import androidx.media3.common.util.UnstableApi
+@@ -26,6 +28,7 @@
+ import expo.modules.audio.AudioLockScreenOptions
+ import expo.modules.audio.AudioPlayer
+ import expo.modules.audio.Metadata
++import expo.modules.audio.R
+ import expo.modules.audio.getPlaybackServiceErrorMessage
+ import expo.modules.kotlin.AppContext
+ import kotlinx.coroutines.CoroutineScope
+@@ -36,6 +39,7 @@
+ import kotlinx.coroutines.launch
+ import java.lang.ref.WeakReference
+ import java.net.URL
++import java.util.IdentityHashMap
+ 
+ @OptIn(UnstableApi::class)
+ class AudioControlsService : MediaSessionService() {
+@@ -46,6 +50,9 @@
+   private var currentMetadata: Metadata? = null
+   private var currentPlayer: AudioPlayer? = null
+   private var currentOptions: AudioLockScreenOptions? = null
++  private var transportPlayer: TransportCommandPlayer? = null
++  private var transportShuffle = false
++  private var transportRepeat = "off"
+   private val scope = CoroutineScope(Dispatchers.IO)
+   private var currentArtworkUrl: URL? = null
+   private var currentArtwork: Bitmap? = null
+@@ -90,6 +97,10 @@
+ 
+         ACTION_SEEK_FORWARD -> currentPlayerRef.seekTo(currentPlayerRef.currentPosition + SEEK_INTERVAL_MS)
+         ACTION_SEEK_BACKWARD -> currentPlayerRef.seekTo(currentPlayerRef.currentPosition - SEEK_INTERVAL_MS)
++        ACTION_NEXT_TRACK -> dispatchTrackCommand(ACTION_NEXT_TRACK)
++        ACTION_PREVIOUS_TRACK -> dispatchTrackCommand(ACTION_PREVIOUS_TRACK)
++        ACTION_SHUFFLE -> dispatchTrackCommand(ACTION_SHUFFLE)
++        ACTION_REPEAT -> dispatchTrackCommand(ACTION_REPEAT)
+       }
+     }
+ 
+@@ -187,11 +198,20 @@
+ 
+     val style = MediaStyleNotificationHelper.MediaStyle(session)
+ 
+-    // Older Android system UI expects explicit notification actions for transport controls.
+-    if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
++    // Explicit actions cover API 32 and older. API 33+ lock screen reads the session,
++    // whose player commands are the same prev / play / next / shuffle / repeat set.
+       val compactViewIndices = mutableListOf<Int>()
+       var currentIndex = 0
+ 
++      val showPrevious = currentOptions?.showPreviousTrack == true
++      val showNext = currentOptions?.showNextTrack == true
++
++      if (showPrevious) {
++        builder.addAction(mediaAction(R.drawable.jf_skip_previous, "Previous", ACTION_PREVIOUS_TRACK))
++        compactViewIndices.add(currentIndex)
++        currentIndex++
++      }
++
+       if (currentOptions?.showSeekBackward == true) {
+         builder.addAction(
+           NotificationCompat.Action(
+@@ -200,19 +220,17 @@
+             buildActionPendingIntent(ACTION_SEEK_BACKWARD)
+           )
+         )
+-        compactViewIndices.add(currentIndex)
++        if (!showPrevious) {
++          compactViewIndices.add(currentIndex)
++        }
+         currentIndex++
+       }
+ 
+       builder.addAction(
+-        NotificationCompat.Action(
+-          if (session.player.isPlaying) {
+-            androidx.media3.session.R.drawable.media3_icon_pause
+-          } else {
+-            androidx.media3.session.R.drawable.media3_icon_play
+-          },
++        mediaAction(
++          if (session.player.isPlaying) R.drawable.jf_pause else R.drawable.jf_play,
+           if (session.player.isPlaying) "Pause" else "Play",
+-          buildActionPendingIntent(if (session.player.isPlaying) ACTION_PAUSE else ACTION_PLAY)
++          if (session.player.isPlaying) ACTION_PAUSE else ACTION_PLAY
+         )
+       )
+       compactViewIndices.add(currentIndex)
+@@ -226,35 +244,156 @@
+             buildActionPendingIntent(ACTION_SEEK_FORWARD)
+           )
+         )
++        if (!showNext) {
++          compactViewIndices.add(currentIndex)
++        }
++        currentIndex++
++      }
++
++      if (showNext) {
++        builder.addAction(mediaAction(R.drawable.jf_skip_next, "Next", ACTION_NEXT_TRACK))
+         compactViewIndices.add(currentIndex)
+       }
+ 
++      if (currentOptions?.showShuffle == true) {
++        builder.addAction(
++          mediaAction(
++            if (transportShuffle) R.drawable.jf_shuffle_on else R.drawable.jf_shuffle,
++            if (transportShuffle) "Shuffle on" else "Shuffle off",
++            ACTION_SHUFFLE
++          )
++        )
++      }
++      if (currentOptions?.showRepeat == true) {
++        builder.addAction(
++          mediaAction(
++            when (transportRepeat) {
++              "one" -> R.drawable.jf_repeat_one
++              "all" -> R.drawable.jf_repeat_all
++              else -> R.drawable.jf_repeat
++            },
++            when (transportRepeat) {
++              "one" -> "Repeat one"
++              "all" -> "Repeat all"
++              else -> "Repeat off"
++            },
++            ACTION_REPEAT
++          )
++        )
++      }
++
+       style.setShowActionsInCompactView(*compactViewIndices.toIntArray())
+-    }
+ 
+     builder.setStyle(style)
+     return builder.build()
+   }
+ 
++  private fun dispatchTrackCommand(action: String, payload: Map<String, Any?> = emptyMap()) {
++    when (action) {
++      ACTION_NEXT_TRACK -> currentPlayer?.emit("onRemoteNextTrack", payload)
++      ACTION_PREVIOUS_TRACK -> currentPlayer?.emit("onRemotePreviousTrack", payload)
++      ACTION_SHUFFLE -> currentPlayer?.emit("onRemoteShuffle", payload)
++      ACTION_REPEAT -> currentPlayer?.emit("onRemoteRepeat", payload)
++      ACTION_SEEK -> currentPlayer?.emit("onRemoteSeek", payload)
++    }
++  }
++
++  private fun repeatModeInt(mode: String?): Int {
++    return when (mode) {
++      "one" -> Player.REPEAT_MODE_ONE
++      "all" -> Player.REPEAT_MODE_ALL
++      else -> Player.REPEAT_MODE_OFF
++    }
++  }
++
++  private fun normalizeRepeat(mode: String?): String {
++    return when (mode) {
++      "one" -> "one"
++      "all" -> "all"
++      else -> "off"
++    }
++  }
++
++  private fun buildSessionPlayer(
++    player: AudioPlayer,
++    options: AudioLockScreenOptions?,
++    metadata: Metadata?
++  ): MetadataInjectingPlayer {
++    transportShuffle = options?.shuffleEnabled == true
++    transportRepeat = normalizeRepeat(options?.repeatMode)
++    val transport = TransportCommandPlayer(resolveSessionPlayer(player, options)) { action, payload ->
++      dispatchTrackCommand(action, payload)
++    }
++    transport.applyFromApp(transportShuffle, repeatModeInt(transportRepeat))
++    transport.applyTimeline(options?.durationMs ?: 0.0, options?.positionOffsetMs ?: 0.0)
++    transportPlayer = transport
++    return MetadataInjectingPlayer(transport).apply {
++      updateMetadata(metadata)
++    }
++  }
++
++  @Suppress("UNUSED_PARAMETER")
++  fun updateTransport(
++    player: AudioPlayer,
++    shuffleEnabled: Boolean,
++    repeatMode: String,
++    durationMs: Double,
++    positionOffsetMs: Double,
++    accentColor: String,
++    iconColor: String,
++    mutedColor: String
++  ) {
++    if (player != currentPlayer) return
++    transportShuffle = shuffleEnabled
++    transportRepeat = normalizeRepeat(repeatMode)
++    transportPlayer?.applyFromApp(transportShuffle, repeatModeInt(transportRepeat))
++    transportPlayer?.applyTimeline(durationMs, positionOffsetMs)
++    updateSessionCustomLayout(player.ref.isPlaying)
++    postOrStartForegroundNotification(startInForeground = false)
++  }
++
++  private fun mediaAction(iconRes: Int, title: String, action: String): NotificationCompat.Action {
++    return NotificationCompat.Action.Builder(iconRes, title, buildActionPendingIntent(action)).build()
++  }
++
+   private fun updateSessionCustomLayout(isPlaying: Boolean) {
+     val session = mediaSession ?: return
+     val mediaButtons = mutableListOf<CommandButton>()
++    val showPrevious = currentOptions?.showPreviousTrack == true
++    val showNext = currentOptions?.showNextTrack == true
++
++    if (showPrevious) {
++      mediaButtons.add(
++        CommandButton.Builder(CommandButton.ICON_PREVIOUS)
++          .setCustomIconResId(R.drawable.jf_skip_previous)
++          .setDisplayName("Previous")
++          .setEnabled(true)
++          .setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS)
++          .setSlots(CommandButton.SLOT_BACK)
++          .build()
++      )
++    }
+ 
+-    // Add seek backward button if enabled
+     if (currentOptions?.showSeekBackward == true) {
+       mediaButtons.add(
+         CommandButton.Builder(CommandButton.ICON_SKIP_BACK_10)
+           .setDisplayName("Seek Backward")
+           .setEnabled(true)
+           .setSessionCommand(SessionCommand(ACTION_SEEK_BACKWARD, Bundle.EMPTY))
+-          .setSlots(CommandButton.SLOT_BACK)
++          .setSlots(
++            *(if (showPrevious) {
++              intArrayOf(CommandButton.SLOT_BACK_SECONDARY, CommandButton.SLOT_OVERFLOW)
++            } else {
++              intArrayOf(CommandButton.SLOT_BACK)
++            })
++          )
+           .build()
+       )
+     }
+ 
+-    // Add play/pause button (always present)
+     mediaButtons.add(
+       CommandButton.Builder(if (isPlaying) CommandButton.ICON_PAUSE else CommandButton.ICON_PLAY)
++        .setCustomIconResId(if (isPlaying) R.drawable.jf_pause else R.drawable.jf_play)
+         .setDisplayName(if (isPlaying) "Pause" else "Play")
+         .setEnabled(true)
+         .setPlayerCommand(Player.COMMAND_PLAY_PAUSE)
+@@ -262,14 +401,76 @@
+         .build()
+     )
+ 
+-    // Add seek forward button if enabled
++    if (showNext) {
++      mediaButtons.add(
++        CommandButton.Builder(CommandButton.ICON_NEXT)
++          .setCustomIconResId(R.drawable.jf_skip_next)
++          .setDisplayName("Next")
++          .setEnabled(true)
++          .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT)
++          .setSlots(CommandButton.SLOT_FORWARD)
++          .build()
++      )
++    }
++
+     if (currentOptions?.showSeekForward == true) {
+       mediaButtons.add(
+         CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD_10)
+           .setDisplayName("Seek Forward")
+           .setEnabled(true)
+           .setSessionCommand(SessionCommand(ACTION_SEEK_FORWARD, Bundle.EMPTY))
+-          .setSlots(CommandButton.SLOT_FORWARD)
++          .setSlots(
++            *(if (showNext) {
++              intArrayOf(CommandButton.SLOT_FORWARD_SECONDARY, CommandButton.SLOT_OVERFLOW)
++            } else {
++              intArrayOf(CommandButton.SLOT_FORWARD)
++            })
++          )
++          .build()
++      )
++    }
++
++    if (currentOptions?.showShuffle == true) {
++      mediaButtons.add(
++        CommandButton.Builder(if (transportShuffle) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF)
++          .setCustomIconResId(if (transportShuffle) R.drawable.jf_shuffle_on else R.drawable.jf_shuffle)
++          .setDisplayName(if (transportShuffle) "Shuffle on" else "Shuffle off")
++          .setEnabled(true)
++          .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
++          .setSlots(CommandButton.SLOT_OVERFLOW)
++          .build()
++      )
++    }
++    if (currentOptions?.showRepeat == true) {
++      val repeatIcon = when (transportRepeat) {
++        "one" -> CommandButton.ICON_REPEAT_ONE
++        "all" -> CommandButton.ICON_REPEAT_ALL
++        else -> CommandButton.ICON_REPEAT_OFF
++      }
++      val repeatLabel = when (transportRepeat) {
++        "one" -> "Repeat one"
++        "all" -> "Repeat all"
++        else -> "Repeat off"
++      }
++      // The tap applies this mode. off -> all -> one -> off, matching the in-app button.
++      val nextRepeatMode = when (transportRepeat) {
++        "off" -> Player.REPEAT_MODE_ALL
++        "all" -> Player.REPEAT_MODE_ONE
++        else -> Player.REPEAT_MODE_OFF
++      }
++      mediaButtons.add(
++        CommandButton.Builder(repeatIcon)
++          .setCustomIconResId(
++            when (transportRepeat) {
++              "one" -> R.drawable.jf_repeat_one
++              "all" -> R.drawable.jf_repeat_all
++              else -> R.drawable.jf_repeat
++            }
++          )
++          .setDisplayName(repeatLabel)
++          .setEnabled(true)
++          .setPlayerCommand(Player.COMMAND_SET_REPEAT_MODE, nextRepeatMode)
++          .setSlots(CommandButton.SLOT_OVERFLOW)
+           .build()
+       )
+     }
+@@ -367,11 +568,9 @@
+ 
+       appContext?.mainQueue?.launch {
+         val context = appContext?.reactContext ?: return@launch
+-        val sessionPlayer = MetadataInjectingPlayer(resolveSessionPlayer(player, options)).apply {
+-          updateMetadata(metadata)
+-        }
++        val sessionPlayer = buildSessionPlayer(player, options, metadata)
+         val session = MediaSession.Builder(context, sessionPlayer)
+-          .setCallback(AudioMediaSessionCallback())
++          .setCallback(AudioMediaSessionCallback { action -> dispatchTrackCommand(action) })
+           .build()
+ 
+         // Replace the basic media session with a session connected to our playback service.
+@@ -418,6 +617,7 @@
+     mediaSession?.release()
+     mediaSession = null
+     sessionMetadataPlayer = null
++    transportPlayer = null
+     currentPlayer?.assignBasicMediaSession()
+     stopForeground(STOP_FOREGROUND_REMOVE)
+   }
+@@ -448,11 +648,9 @@
+       sessionMetadataPlayer = null
+       appContext?.mainQueue?.launch {
+         val context = appContext?.reactContext ?: return@launch
+-        val sessionPlayer = MetadataInjectingPlayer(resolveSessionPlayer(player, options)).apply {
+-          updateMetadata(metadata)
+-        }
++        val sessionPlayer = buildSessionPlayer(player, options, metadata)
+         val session = MediaSession.Builder(context, sessionPlayer)
+-          .setCallback(AudioMediaSessionCallback())
++          .setCallback(AudioMediaSessionCallback { action -> dispatchTrackCommand(action) })
+           .build()
+ 
+         player.mediaSession.release()
+@@ -558,7 +756,185 @@
+ 
+     const val ACTION_SEEK_FORWARD = "expo.modules.audio.action.SEEK_FORWARD"
+     const val ACTION_SEEK_BACKWARD = "expo.modules.audio.action.SEEK_BACKWARD"
++    const val ACTION_NEXT_TRACK = "expo.modules.audio.action.NEXT_TRACK"
++    const val ACTION_PREVIOUS_TRACK = "expo.modules.audio.action.PREVIOUS_TRACK"
++    const val ACTION_SHUFFLE = "expo.modules.audio.action.SHUFFLE"
++    const val ACTION_REPEAT = "expo.modules.audio.action.REPEAT"
++    const val ACTION_SEEK = "expo.modules.audio.action.SEEK"
+ 
+     const val SEEK_INTERVAL_MS = 10000L
+   }
+ }
++
++@OptIn(UnstableApi::class)
++private class TransportCommandPlayer(
++  player: Player,
++  private val onCommand: (String, Map<String, Any?>) -> Unit
++) : ForwardingPlayer(player) {
++  private val listeners = IdentityHashMap<Player.Listener, Boolean>()
++  private var shuffleEnabled = false
++  private var appRepeatMode = Player.REPEAT_MODE_OFF
++  private var injectedDurationMs = 0L
++  private var positionOffsetMs = 0L
++  private var ignoreLeadInSeekUntil = 0L
++  private var timelineAppliedAt = 0L
++
++  override fun addListener(listener: Player.Listener) {
++    synchronized(listeners) { listeners[listener] = true }
++    super.addListener(listener)
++  }
++
++  override fun removeListener(listener: Player.Listener) {
++    synchronized(listeners) { listeners.remove(listener) }
++    super.removeListener(listener)
++  }
++
++  override fun isCommandAvailable(command: Int): Boolean {
++    if (command == Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM && duration > 0) return true
++    return command == Player.COMMAND_SEEK_TO_NEXT ||
++      command == Player.COMMAND_SEEK_TO_PREVIOUS ||
++      command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
++      command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM ||
++      command == Player.COMMAND_SET_SHUFFLE_MODE ||
++      command == Player.COMMAND_SET_REPEAT_MODE ||
++      super.isCommandAvailable(command)
++  }
++
++  override fun getAvailableCommands(): Player.Commands {
++    val commands = super.getAvailableCommands().buildUpon()
++      .add(Player.COMMAND_SEEK_TO_NEXT)
++      .add(Player.COMMAND_SEEK_TO_PREVIOUS)
++      .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++      .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++      .add(Player.COMMAND_SET_SHUFFLE_MODE)
++      .add(Player.COMMAND_SET_REPEAT_MODE)
++    if (duration > 0) commands.add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
++    return commands.build()
++  }
++
++  override fun getDuration(): Long {
++    val native = super.getDuration()
++    if (injectedDurationMs > 0 && (native == C.TIME_UNSET || native <= 0L || positionOffsetMs > 0L)) {
++      return injectedDurationMs
++    }
++    return if (native == C.TIME_UNSET) 0L else native
++  }
++
++  override fun getCurrentPosition(): Long {
++    val raw = super.getCurrentPosition()
++    val base = if (raw < 0L) 0L else raw
++    val position = positionOffsetMs + base
++    val length = duration
++    return if (length > 0L) position.coerceAtMost(length) else position
++  }
++
++  override fun seekTo(positionMs: Long) {
++    val wallMs = positionMs.coerceAtLeast(0L)
++    val now = android.os.SystemClock.elapsedRealtime()
++    // Publishing a new duration makes the system seek back to the start. That is not a scrub.
++    if (now < ignoreLeadInSeekUntil) return
++    if (wallMs < 1_500L && timelineAppliedAt > 0L && now < timelineAppliedAt + 8_000L) return
++    val current = currentPosition
++    if (kotlin.math.abs(wallMs - current) < 2_000L) return
++    val native = super.getDuration()
++    val mediaMs = (wallMs - positionOffsetMs).coerceAtLeast(0L)
++    if (native != C.TIME_UNSET && native > 0L) {
++      super.seekTo(mediaMs.coerceAtMost(native))
++      onCommand(AudioControlsService.ACTION_SEEK, mapOf("position" to wallMs / 1000.0))
++    } else {
++      onCommand(
++        AudioControlsService.ACTION_SEEK,
++        mapOf("position" to wallMs / 1000.0, "perform" to true)
++      )
++    }
++  }
++
++  override fun hasNextMediaItem(): Boolean = true
++
++  override fun hasPreviousMediaItem(): Boolean = true
++
++  override fun seekToNext() {
++    onCommand(AudioControlsService.ACTION_NEXT_TRACK, emptyMap())
++  }
++
++  override fun seekToNextMediaItem() {
++    seekToNext()
++  }
++
++  override fun seekToPrevious() {
++    onCommand(AudioControlsService.ACTION_PREVIOUS_TRACK, emptyMap())
++  }
++
++  override fun seekToPreviousMediaItem() {
++    seekToPrevious()
++  }
++
++  override fun getShuffleModeEnabled(): Boolean = shuffleEnabled
++
++  override fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
++    if (shuffleEnabled == shuffleModeEnabled) return
++    shuffleEnabled = shuffleModeEnabled
++    notifyTransportChanged()
++    onCommand(AudioControlsService.ACTION_SHUFFLE, mapOf("enabled" to shuffleModeEnabled))
++  }
++
++  override fun getRepeatMode(): Int = appRepeatMode
++
++  override fun setRepeatMode(repeatMode: Int) {
++    if (appRepeatMode == repeatMode) return
++    appRepeatMode = repeatMode
++    notifyTransportChanged()
++    val name = when (repeatMode) {
++      Player.REPEAT_MODE_ONE -> "one"
++      Player.REPEAT_MODE_ALL -> "all"
++      else -> "off"
++    }
++    onCommand(AudioControlsService.ACTION_REPEAT, mapOf("mode" to name))
++  }
++
++  fun applyFromApp(shuffle: Boolean, repeatMode: Int) {
++    val changed = shuffleEnabled != shuffle || appRepeatMode != repeatMode
++    shuffleEnabled = shuffle
++    appRepeatMode = repeatMode
++    if (changed) notifyTransportChanged()
++  }
++
++  fun applyTimeline(durationMs: Double, offsetMs: Double) {
++    val nextDuration = durationMs.toLong().coerceAtLeast(0L)
++    val nextOffset = offsetMs.toLong().coerceAtLeast(0L)
++    val changed = injectedDurationMs != nextDuration || positionOffsetMs != nextOffset
++    injectedDurationMs = nextDuration
++    positionOffsetMs = nextOffset
++    timelineAppliedAt = android.os.SystemClock.elapsedRealtime()
++    ignoreLeadInSeekUntil = timelineAppliedAt + 4_000L
++    if (!changed) return
++    val current = synchronized(listeners) { listeners.keys.toList() }
++    val events = Player.Events(
++      FlagSet.Builder()
++        .add(Player.EVENT_TIMELINE_CHANGED)
++        .add(Player.EVENT_AVAILABLE_COMMANDS_CHANGED)
++        .build()
++    )
++    current.forEach {
++      it.onAvailableCommandsChanged(availableCommands)
++      it.onEvents(this, events)
++    }
++  }
++
++  private fun notifyTransportChanged() {
++    val current = synchronized(listeners) { listeners.keys.toList() }
++    val events = Player.Events(
++      FlagSet.Builder()
++        .add(Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED)
++        .add(Player.EVENT_REPEAT_MODE_CHANGED)
++        .add(Player.EVENT_AVAILABLE_COMMANDS_CHANGED)
++        .build()
++    )
++    current.forEach {
++      it.onShuffleModeEnabledChanged(shuffleEnabled)
++      it.onRepeatModeChanged(appRepeatMode)
++      it.onAvailableCommandsChanged(availableCommands)
++      it.onEvents(this, events)
++    }
++  }
++}
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
+@@ -1,6 +1,9 @@
+ package expo.modules.audio.service
+ 
++import android.content.Intent
++import android.os.Build
+ import android.os.Bundle
++import android.view.KeyEvent
+ import androidx.media3.common.Player
+ import androidx.media3.session.MediaSession
+ import androidx.media3.session.SessionCommand
+@@ -10,31 +13,39 @@
+ import com.google.common.util.concurrent.ListenableFuture
+ 
+ @OptIn(UnstableApi::class)
+-class AudioMediaSessionCallback : MediaSession.Callback {
++class AudioMediaSessionCallback(
++  private val onTrackCommand: (String) -> Unit = {}
++) : MediaSession.Callback {
+   override fun onConnect(
+     session: MediaSession,
+     controller: MediaSession.ControllerInfo
+   ): MediaSession.ConnectionResult {
+     try {
+-      // Configure commands - custom layout buttons will be rendered from session
++      // Android 13+ lock screen and the media notification only render player commands.
++      // Next, previous, shuffle, and repeat stay player commands. TransportCommandPlayer
++      // turns them into app events instead of moving ExoPlayer's single item.
+       return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+         .setAvailablePlayerCommands(
+           MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+-            // Keep seek commands for the seek slider
+             .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+             .add(Player.COMMAND_SEEK_FORWARD)
+             .add(Player.COMMAND_SEEK_BACK)
+-            // Remove track navigation commands
+-            .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+-            .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+-            .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+-            .remove(Player.COMMAND_SEEK_TO_NEXT)
++            .add(Player.COMMAND_SEEK_TO_PREVIOUS)
++            .add(Player.COMMAND_SEEK_TO_NEXT)
++            .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++            .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++            .add(Player.COMMAND_SET_SHUFFLE_MODE)
++            .add(Player.COMMAND_SET_REPEAT_MODE)
+             .build()
+         )
+         .setAvailableSessionCommands(
+           MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+             .add(SessionCommand(AudioControlsService.ACTION_SEEK_BACKWARD, Bundle.EMPTY))
+             .add(SessionCommand(AudioControlsService.ACTION_SEEK_FORWARD, Bundle.EMPTY))
++            .add(SessionCommand(AudioControlsService.ACTION_NEXT_TRACK, Bundle.EMPTY))
++            .add(SessionCommand(AudioControlsService.ACTION_PREVIOUS_TRACK, Bundle.EMPTY))
++            .add(SessionCommand(AudioControlsService.ACTION_SHUFFLE, Bundle.EMPTY))
++            .add(SessionCommand(AudioControlsService.ACTION_REPEAT, Bundle.EMPTY))
+             .build()
+         )
+         .build()
+@@ -56,7 +67,38 @@
+       AudioControlsService.ACTION_SEEK_BACKWARD -> {
+         session.player.seekTo(session.player.currentPosition - AudioControlsService.SEEK_INTERVAL_MS)
+       }
++      AudioControlsService.ACTION_NEXT_TRACK,
++      AudioControlsService.ACTION_PREVIOUS_TRACK,
++      AudioControlsService.ACTION_SHUFFLE,
++      AudioControlsService.ACTION_REPEAT -> {
++        onTrackCommand(command.customAction)
++      }
+     }
+     return super.onCustomCommand(session, controller, command, args)
+   }
++
++  override fun onMediaButtonEvent(
++    session: MediaSession,
++    controllerInfo: MediaSession.ControllerInfo,
++    intent: Intent
++  ): Boolean {
++    val event = if (Build.VERSION.SDK_INT >= 33) {
++      intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
++    } else {
++      @Suppress("DEPRECATION")
++      intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
++    } ?: return false
++    if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return false
++    when (event.keyCode) {
++      KeyEvent.KEYCODE_MEDIA_NEXT -> {
++        onTrackCommand(AudioControlsService.ACTION_NEXT_TRACK)
++        return true
++      }
++      KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
++        onTrackCommand(AudioControlsService.ACTION_PREVIOUS_TRACK)
++        return true
++      }
++    }
++    return false
++  }
+ }
+diff --git a/node_modules/expo-audio/ios/AudioRecords.swift b/node_modules/expo-audio/ios/AudioRecords.swift
+--- a/node_modules/expo-audio/ios/AudioRecords.swift
++++ b/node_modules/expo-audio/ios/AudioRecords.swift
+@@ -70,6 +70,17 @@
+   @Field var showSeekForward: Bool = false
+   @Field var showSeekBackward: Bool = false
+   @Field var isLiveStream: Bool? = false
++  @Field var showNextTrack: Bool = false
++  @Field var showPreviousTrack: Bool = false
++  @Field var showShuffle: Bool = false
++  @Field var showRepeat: Bool = false
++  @Field var shuffleEnabled: Bool = false
++  @Field var repeatMode: String = "off"
++  @Field var durationMs: Double = 0
++  @Field var positionOffsetMs: Double = 0
++  @Field var accentColor: String = ""
++  @Field var iconColor: String = ""
++  @Field var mutedColor: String = ""
+ }
+ 
+ enum BitRateStrategy: String, Enumerable {
+diff --git a/node_modules/expo-audio/ios/MediaController.swift b/node_modules/expo-audio/ios/MediaController.swift
+--- a/node_modules/expo-audio/ios/MediaController.swift
++++ b/node_modules/expo-audio/ios/MediaController.swift
+@@ -14,6 +14,12 @@
+   private var artworkLoadToken: UUID?
+   private var currentArtworkItemIdentifier: ObjectIdentifier?
+   private var isLiveStream = false
++  private var injectedDuration: Double = 0
++  private var positionOffset: Double = 0
++  private var nextTrackToken: Any?
++  private var previousTrackToken: Any?
++  private var shuffleToken: Any?
++  private var repeatToken: Any?
+ 
+   func setActivePlayer(_ player: AudioPlayer?, options: LockScreenOptions? = nil) {
+     performOnMain {
+@@ -80,8 +86,8 @@
+       info.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
+       info.removeValue(forKey: MPNowPlayingInfoPropertyElapsedPlaybackTime)
+     } else {
+-      info[MPMediaItemPropertyPlaybackDuration] = player.duration
+-      info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = player.currentTime
++      info[MPMediaItemPropertyPlaybackDuration] = resolvedDuration(for: player)
++      info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = resolvedElapsed(for: player)
+     }
+     info[MPNowPlayingInfoPropertyPlaybackRate] = player.isPlaying ? player.ref.rate : 0.0
+     info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+@@ -270,8 +276,74 @@
+       }
+ 
+       let seekTime = CMTime(seconds: event.positionTime, preferredTimescale: 1)
+-      player.ref.seek(to: seekTime)
++      let nativeDuration = player.duration
++      if nativeDuration.isFinite && nativeDuration > 1 {
++        player.ref.seek(to: seekTime)
++        player.emit(event: "onRemoteSeek", payload: ["position": event.positionTime, "perform": 0.0])
++      } else {
++        player.emit(event: "onRemoteSeek", payload: ["position": event.positionTime, "perform": 1.0])
++      }
++
++      return .success
++    }
++
++    if let token = nextTrackToken {
++      remoteCommandCenter.nextTrackCommand.removeTarget(token)
++      nextTrackToken = nil
++    }
++    nextTrackToken = remoteCommandCenter.nextTrackCommand.addTarget { [weak self] _ in
++      guard let player = self?.activePlayer else {
++        return .commandFailed
++      }
++      player.emit(event: "onRemoteNextTrack", payload: [String: String]())
++      return .success
++    }
+ 
++    if let token = previousTrackToken {
++      remoteCommandCenter.previousTrackCommand.removeTarget(token)
++      previousTrackToken = nil
++    }
++    previousTrackToken = remoteCommandCenter.previousTrackCommand.addTarget { [weak self] _ in
++      guard let player = self?.activePlayer else {
++        return .commandFailed
++      }
++      player.emit(event: "onRemotePreviousTrack", payload: [String: String]())
++      return .success
++    }
++
++    if let token = shuffleToken {
++      remoteCommandCenter.changeShuffleModeCommand.removeTarget(token)
++      shuffleToken = nil
++    }
++    shuffleToken = remoteCommandCenter.changeShuffleModeCommand.addTarget { [weak self] event in
++      guard let player = self?.activePlayer else {
++        return .commandFailed
++      }
++      let shuffleType = (event as? MPChangeShuffleModeCommandEvent)?.shuffleType ?? .off
++      let enabled = shuffleType == .items || shuffleType == .collections
++      player.emit(event: "onRemoteShuffle", payload: ["enabled": enabled])
++      return .success
++    }
++
++    if let token = repeatToken {
++      remoteCommandCenter.changeRepeatModeCommand.removeTarget(token)
++      repeatToken = nil
++    }
++    repeatToken = remoteCommandCenter.changeRepeatModeCommand.addTarget { [weak self] event in
++      guard let player = self?.activePlayer else {
++        return .commandFailed
++      }
++      let repeatType = (event as? MPChangeRepeatModeCommandEvent)?.repeatType ?? .off
++      let mode: String
++      switch repeatType {
++      case .one:
++        mode = "one"
++      case .all:
++        mode = "all"
++      default:
++        mode = "off"
++      }
++      player.emit(event: "onRemoteRepeat", payload: ["mode": mode])
+       return .success
+     }
+ 
+@@ -309,6 +381,63 @@
+     remoteCommandCenter.changePlaybackPositionCommand.isEnabled = !isLiveStream
+     remoteCommandCenter.skipForwardCommand.isEnabled = options?.showSeekForward ?? false
+     remoteCommandCenter.skipBackwardCommand.isEnabled = options?.showSeekBackward ?? false
++    remoteCommandCenter.nextTrackCommand.isEnabled = options?.showNextTrack ?? false
++    remoteCommandCenter.previousTrackCommand.isEnabled = options?.showPreviousTrack ?? false
++    remoteCommandCenter.changeShuffleModeCommand.isEnabled = options?.showShuffle ?? false
++    remoteCommandCenter.changeRepeatModeCommand.isEnabled = options?.showRepeat ?? false
++    injectedDuration = (options?.durationMs ?? 0) / 1000
++    positionOffset = (options?.positionOffsetMs ?? 0) / 1000
++    applyTransport(
++      shuffleEnabled: options?.shuffleEnabled ?? false,
++      repeatMode: options?.repeatMode ?? "off"
++    )
++  }
++
++  func updateTransport(
++    shuffleEnabled: Bool,
++    repeatMode: String,
++    durationSeconds: Double,
++    positionOffsetSeconds: Double
++  ) {
++    performOnMain {
++      self.injectedDuration = durationSeconds
++      self.positionOffset = positionOffsetSeconds
++      self.applyTransport(shuffleEnabled: shuffleEnabled, repeatMode: repeatMode)
++      if let player = self.activePlayer {
++        self.updateNowPlayingInfoOnMain(for: player)
++      }
++    }
++  }
++
++  private func resolvedDuration(for player: AudioPlayer) -> Double {
++    if player.duration.isFinite && player.duration > 1 && positionOffset <= 0.05 {
++      return player.duration
++    }
++    if injectedDuration > 1 {
++      return injectedDuration
++    }
++    return player.duration.isFinite ? player.duration : 0
++  }
++
++  private func resolvedElapsed(for player: AudioPlayer) -> Double {
++    let elapsed = max(0, player.currentTime) + (positionOffset > 0.05 ? positionOffset : 0)
++    let duration = resolvedDuration(for: player)
++    if duration > 1 {
++      return min(elapsed, duration)
++    }
++    return elapsed
++  }
++
++  private func applyTransport(shuffleEnabled: Bool, repeatMode: String) {
++    remoteCommandCenter.changeShuffleModeCommand.currentShuffleType = shuffleEnabled ? .items : .off
++    switch repeatMode {
++    case "one":
++      remoteCommandCenter.changeRepeatModeCommand.currentRepeatType = .one
++    case "all":
++      remoteCommandCenter.changeRepeatModeCommand.currentRepeatType = .all
++    default:
++      remoteCommandCenter.changeRepeatModeCommand.currentRepeatType = .off
++    }
+   }
+ 
+   private func disableRemoteCommands() {
+@@ -318,6 +447,10 @@
+     remoteCommandCenter.changePlaybackPositionCommand.isEnabled = false
+     remoteCommandCenter.skipForwardCommand.isEnabled = false
+     remoteCommandCenter.skipBackwardCommand.isEnabled = false
++    remoteCommandCenter.nextTrackCommand.isEnabled = false
++    remoteCommandCenter.previousTrackCommand.isEnabled = false
++    remoteCommandCenter.changeShuffleModeCommand.isEnabled = false
++    remoteCommandCenter.changeRepeatModeCommand.isEnabled = false
+ 
+     // Remove event targets
+     remoteCommandCenter.playCommand.removeTarget(self)
+@@ -326,5 +459,21 @@
+     remoteCommandCenter.changePlaybackPositionCommand.removeTarget(self)
+     remoteCommandCenter.skipForwardCommand.removeTarget(self)
+     remoteCommandCenter.skipBackwardCommand.removeTarget(self)
++    if let token = nextTrackToken {
++      remoteCommandCenter.nextTrackCommand.removeTarget(token)
++      nextTrackToken = nil
++    }
++    if let token = previousTrackToken {
++      remoteCommandCenter.previousTrackCommand.removeTarget(token)
++      previousTrackToken = nil
++    }
++    if let token = shuffleToken {
++      remoteCommandCenter.changeShuffleModeCommand.removeTarget(token)
++      shuffleToken = nil
++    }
++    if let token = repeatToken {
++      remoteCommandCenter.changeRepeatModeCommand.removeTarget(token)
++      repeatToken = nil
++    }
+   }
+ }
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+@@ -123,6 +123,28 @@
+     }
+   }
+ 
++  fun updateLockScreenTransport(
++    shuffleEnabled: Boolean,
++    repeatMode: String,
++    durationMs: Double,
++    positionOffsetMs: Double,
++    accentColor: String,
++    iconColor: String,
++    mutedColor: String
++  ) {
++    if (!isActiveForLockScreen) return
++    serviceConnection.playbackServiceBinder?.service?.updateTransport(
++      this,
++      shuffleEnabled,
++      repeatMode,
++      durationMs,
++      positionOffsetMs,
++      accentColor,
++      iconColor,
++      mutedColor
++    )
++  }
++
+   fun updateLockScreenMetadata(metadata: Metadata) {
+     if (isActiveForLockScreen) {
+       this.metadata = metadata
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
+@@ -519,6 +519,27 @@
+         }
+       }
+ 
++      Function("updateLockScreenTransport") {
++          ref: AudioPlayer,
++          shuffleEnabled: Boolean,
++          repeatMode: String,
++          durationMs: Double,
++          positionOffsetMs: Double,
++          accentColor: String,
++          iconColor: String,
++          mutedColor: String ->
++        runOnMain {
++          ref.updateLockScreenTransport(
++            shuffleEnabled,
++            repeatMode,
++            durationMs,
++            positionOffsetMs,
++            accentColor,
++            iconColor,
++            mutedColor
++          )
++        }
++      }
+ 
+       Function("clearLockScreenControls") { ref: AudioPlayer ->
+         runOnMain {
+diff --git a/node_modules/expo-audio/ios/AudioModule.swift b/node_modules/expo-audio/ios/AudioModule.swift
+--- a/node_modules/expo-audio/ios/AudioModule.swift
++++ b/node_modules/expo-audio/ios/AudioModule.swift
+@@ -269,6 +269,28 @@
+         }
+       }
+ 
++      Function("updateLockScreenTransport") {
++        (
++          player: AudioPlayer,
++          shuffleEnabled: Bool,
++          repeatMode: String,
++          durationMs: Double,
++          positionOffsetMs: Double,
++          accentColor: String,
++          iconColor: String,
++          mutedColor: String
++        ) in
++        guard player.isActiveForLockScreen else { return }
++        MediaController.shared.updateTransport(
++          shuffleEnabled: shuffleEnabled,
++          repeatMode: repeatMode,
++          durationSeconds: durationMs / 1000,
++          positionOffsetSeconds: positionOffsetMs / 1000
++        )
++        _ = accentColor
++        _ = iconColor
++        _ = mutedColor
++      }
+ 
+       Function("clearLockScreenControls") { (player: AudioPlayer) in
+         if player.isActiveForLockScreen {
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_previous.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_previous.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_previous.xml
+@@ -0,0 +1,9 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M112,64a16,16 0,0 1,16 16V216.43L360.77,77.11a35.13,35.13 0,0 1,35.77 -0.44c12,6.8 19.46,20 19.46,34.33V401c0,14.37 -7.46,27.53 -19.46,34.33a35.14,35.14 0,0 1,-35.77 -0.45L128,295.57V432a16,16 0,0 1,-32 0V80A16,16 0,0 1,112 64Z" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_next.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_next.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_skip_next.xml
+@@ -0,0 +1,9 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M400,64a16,16 0,0 0,-16 16V216.43L151.23,77.11a35.13,35.13 0,0 0,-35.77 -0.44C103.46,83.47 96,96.63 96,111V401c0,14.37 7.46,27.53 19.46,34.33a35.14,35.14 0,0 0,35.77 -0.45L384,295.57V432a16,16 0,0 0,32 0V80A16,16 0,0 0,400 64Z" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_play.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_play.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_play.xml
+@@ -0,0 +1,9 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M133,440a35.37,35.37 0,0 1,-17.5 -4.67c-12,-6.8 -19.46,-20 -19.46,-34.33V111c0,-14.37 7.46,-27.53 19.46,-34.33a35.13,35.13 0,0 1,35.77 0.45L399.12,225.48a36,36 0,0 1,0 61L151.23,434.88A35.5,35.5 0,0 1,133 440Z" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_pause.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_pause.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_pause.xml
+@@ -0,0 +1,12 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M208,432H160a16,16 0,0 1,-16 -16V96a16,16 0,0 1,16 -16h48a16,16 0,0 1,16 16V416A16,16 0,0 1,208 432Z" />
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M352,432H304a16,16 0,0 1,-16 -16V96a16,16 0,0 1,16 -16h48a16,16 0,0 1,16 16V416A16,16 0,0 1,352 432Z" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_shuffle.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_shuffle.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_shuffle.xml
+@@ -0,0 +1,41 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M400,304 L448,352 L400,400"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M400,112 L448,160 L400,208"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M64,352 H149.19 a80,80 0,0 0,66.56 -35.62 L256,256"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M64,160 H149.19 a80,80 0,0 1,66.56 35.62 l80.5,120.76 A80,80 0,0 0,362.81 352 H416"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M416,160 H362.81 a80,80 0,0 0,-66.56 35.62 L288,208"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_shuffle_on.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_shuffle_on.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_shuffle_on.xml
+@@ -0,0 +1,44 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M400,280 L448,328 L400,376"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="48" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M400,88 L448,136 L400,184"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="48" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M64,328 H149.19 a80,80 0,0 0,66.56 -35.62 L256,232"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="48" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M64,136 H149.19 a80,80 0,0 1,66.56 35.62 l80.5,120.76 A80,80 0,0 0,362.81 328 H416"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="48" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M416,136 H362.81 a80,80 0,0 0,-66.56 35.62 L288,184"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="48" />
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M96,430 h320 a18,18 0,0 1,0 36 h-320 a18,18 0,0 1,0 -36 z" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat.xml
+@@ -0,0 +1,34 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M320,120 L368,168 L320,216"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M352,168 H144 a80.24,80.24 0,0 0,-80 80 v16"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M192,392 L144,344 L192,296"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M160,344 H368 a80.24,80.24 0,0 0,80 -80 V248"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat_all.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat_all.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat_all.xml
+@@ -0,0 +1,37 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M320,96 L376,152 L320,208"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M360,152 H144 a96,96 0,0 0,-96 96 v8"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M192,416 L136,360 L192,304"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M152,360 H368 a96,96 0,0 0,96 -96 v-8"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M256,256 m-34,0 a34,34 0,1 1,68 0 a34,34 0,1 1,-68 0" />
++</vector>
+diff --git a/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat_one.xml b/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat_one.xml
+--- /dev/null
++++ b/node_modules/expo-audio/android/src/main/res/drawable/jf_repeat_one.xml
+@@ -0,0 +1,37 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M320,120 L368,168 L320,216"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M352,168 H144 a80.24,80.24 0,0 0,-80 80 v16"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M192,392 L144,344 L192,296"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="@android:color/transparent"
++        android:pathData="M160,344 H368 a80.24,80.24 0,0 0,80 -80 V248"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:strokeWidth="44" />
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M232,196 h36 l-14,-22 h-28 z M226,214 h40 v150 h-32 v-118 h-8 z" />
++</vector>

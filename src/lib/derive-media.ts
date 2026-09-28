@@ -92,11 +92,3 @@ export function splitSearchHits(items: BaseItem[] | undefined) {
     genres: list.filter((item) => item.type === 'MusicGenre' || item.type === 'Genre').slice(0, 6),
   };
 }
-
-/** Reuse a cached list when it already covers `limit`, or is a complete short album. */
-export function takeCachedTracks(cached: BaseItem[] | undefined, limit: number): BaseItem[] | null {
-  if (!cached) return null;
-  if (cached.length >= limit) return cached.slice(0, limit);
-  if (cached.length < 500) return cached;
-  return null;
-}

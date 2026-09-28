@@ -3,7 +3,7 @@
 A music client for a self-hosted Jellyfin library.
 
 - **Stack:** Expo SDK 57 + React Native + TypeScript + Expo Router
-- **Platforms:** Android and iOS (web works for browse/login; background audio is native)
+- **Platforms:** Android and iOS. Web plays in the page; background audio, the lock screen, and downloads are native.
 - **Distribution:** personal / sideload. No Play Store or App Store signing in this repo.
 - **Server API:** Jellyfin 10.12
 
@@ -27,14 +27,14 @@ npm run typecheck
 npx expo start
 ```
 
-Scan the QR code with Expo Go to browse UI. **Background playback and lock-screen controls need a development build**, not Expo Go:
+Scan the QR code with Expo Go to browse UI. **Background playback and lock-screen controls need a development build**, not Expo Go. Next, previous, shuffle, repeat, and the timed seek bar come from `patches/expo-audio+57.0.5.patch`, applied on `npm install`. Android compiles that module from source (`expo.autolinking.buildFromSource` includes `expo-audio`). The precompiled package ignores the patch. Rebuild after pulling it:
 
 ```bash
 npx expo run:android
 npx expo run:ios      # macOS + Xcode
 ```
 
-Web (browse + login; CORS must be allowed on the server):
+Web (in-page playback; CORS must be allowed on the server):
 
 ```bash
 npx expo start --web
@@ -63,7 +63,7 @@ Auth header:
 Authorization: MediaBrowser Client="Jellyfy", Device="<phone or browser name>", DeviceId="…", Version="1.0.0", Token="…"
 ```
 
-Streaming quality lives in Settings (`original` / `high` 320 / `normal` 192 / `low` 96).
+Streaming quality lives in Settings (`original` / `high` 320 / `normal` 192 / `low` 96). The default is original. Theme defaults to the device appearance.
 
 ## Scripts
 

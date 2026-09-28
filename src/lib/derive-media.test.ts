@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { BaseItem } from '@/api/types';
-import { albumsFromAudio, artistsFromAudio, mergeItemsById, splitSearchHits, takeCachedTracks } from '@/lib/derive-media';
+import { albumsFromAudio, artistsFromAudio, mergeItemsById, splitSearchHits } from '@/lib/derive-media';
 
 const track = (partial: Partial<BaseItem> & { id: string }): BaseItem => ({
   type: 'Audio',
@@ -86,27 +86,5 @@ describe('splitSearchHits', () => {
     expect(split.albums).toHaveLength(1);
     expect(split.playlists).toHaveLength(1);
     expect(split.genres).toHaveLength(1);
-  });
-});
-
-describe('takeCachedTracks', () => {
-  const list = [{ id: '1' }, { id: '2' }] as BaseItem[];
-
-  it('returns a slice when the cache covers the limit', () => {
-    expect(takeCachedTracks(list, 1)?.map((item) => item.id)).toEqual(['1']);
-  });
-
-  it('returns a short complete album as-is', () => {
-    expect(takeCachedTracks(list, 100)).toEqual(list);
-  });
-
-  it('misses when a long page is still shorter than the requested cap', () => {
-    const page = Array.from({ length: 500 }, (_, i) => ({ id: String(i) })) as BaseItem[];
-    expect(takeCachedTracks(page, 2000)).toBeNull();
-  });
-
-  it('lets play reuse an already-loaded album query', () => {
-    const cached = Array.from({ length: 12 }, (_, i) => ({ id: `t${i}`, type: 'Audio' })) as BaseItem[];
-    expect(takeCachedTracks(cached, 100)?.length).toBe(12);
   });
 });

@@ -32,7 +32,7 @@ import { SeekBar } from '@/components/SeekBar';
 import { SpectrumBars } from '@/components/SpectrumBars';
 import { useTrackActions } from '@/components/useTrackActions';
 import { spacing } from '@/constants/theme';
-import { SheetGrabber, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
+import { SheetBackdrop, SheetGrabber, SheetSurface, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
 import { resolveDeviceName } from '@/lib/device';
 import { artistLine } from '@/lib/format';
 import { colorFromId } from '@/lib/hash-color';
@@ -186,7 +186,10 @@ export default function PlayerScreen() {
     dragX.value = 0;
     closeOverlay(router);
   };
-  const { gesture: dismissPan, style: sheetStyle } = useSwipeDownClose(close);
+  const { gesture: dismissPan, style: sheetStyle, backdropStyle, dismiss } = useSwipeDownClose(close, {
+    animateIn: true,
+    interceptBack: true,
+  });
   const goPrevTrack = () => {
     if (prevIndex == null) return;
     bumpSkip();
@@ -239,12 +242,14 @@ export default function PlayerScreen() {
 
   if (!current) {
     return (
-      <Animated.View style={[styles.screen, sheetStyle, { backgroundColor: c.bg, paddingTop: insets.top + 12 }]}>
+      <View style={styles.overlay}>
+      <SheetBackdrop style={backdropStyle} />
+      <SheetSurface wash={c.bg} style={[styles.screen, sheetStyle, { paddingTop: insets.top + 12 }]}>
         <GestureDetector gesture={dismissPan}>
           <View>
             <SheetGrabber color={c.textMuted} />
             <View style={styles.topBar}>
-              <IconButton name="chevron-down" accessibilityLabel="Close" onPress={close} />
+              <IconButton name="chevron-down" accessibilityLabel="Close" onPress={dismiss} />
               <View style={{ width: 24 }} />
             </View>
           </View>
@@ -252,13 +257,14 @@ export default function PlayerScreen() {
         <Text style={[styles.emptyTitle, { color: c.text }]}>Nothing is playing</Text>
         <Text style={[styles.emptySub, { color: c.textSub }]}>Play a song from your library.</Text>
         <Pressable
-          onPress={close}
+          onPress={dismiss}
           style={[styles.emptyBtn, { backgroundColor: c.accent }]}
           accessibilityRole="button"
           accessibilityLabel="Close">
           <Text style={[styles.emptyBtnText, { color: c.onAccent }]}>Back</Text>
         </Pressable>
-      </Animated.View>
+      </SheetSurface>
+      </View>
     );
   }
 
@@ -267,18 +273,17 @@ export default function PlayerScreen() {
   const repeatLabel = repeat === 'one' ? 'Repeat one' : repeat === 'all' ? 'Repeat all' : 'Repeat off';
 
   return (
-    <Animated.View
-      style={[
-        styles.screen,
-        sheetStyle,
-        { backgroundColor: c.bg, paddingTop: insets.top + 2, paddingBottom: insets.bottom + 10 },
-      ]}>
+    <View style={styles.overlay}>
+    <SheetBackdrop style={backdropStyle} />
+    <SheetSurface
+      wash={c.bg}
+      style={[styles.screen, sheetStyle, { paddingTop: insets.top + 2, paddingBottom: insets.bottom + 10 }]}>
       <LinearGradient colors={[wash, c.bg]} style={styles.wash} pointerEvents="none" />
       <GestureDetector gesture={dismissPan}>
         <View>
           <SheetGrabber color={c.textMuted} />
           <View style={styles.topBar}>
-            <IconButton name="chevron-down" accessibilityLabel="Close" onPress={close} />
+            <IconButton name="chevron-down" accessibilityLabel="Close" onPress={dismiss} />
             <Pressable
               disabled={!source?.href}
               onPress={() => source?.href && router.push(source.href)}
@@ -462,7 +467,8 @@ export default function PlayerScreen() {
         actions={actions.actions}
         onClose={actions.close}
       />
-    </Animated.View>
+    </SheetSurface>
+    </View>
   );
 }
 
@@ -485,6 +491,7 @@ function ArtSlide({
 const webPan = { touchAction: 'none' } as Record<string, string>;
 
 const styles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: 'transparent' },
   screen: { flex: 1 },
   wash: {
     position: 'absolute',

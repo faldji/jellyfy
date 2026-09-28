@@ -13,6 +13,8 @@ export function buildPlayingBody(input: {
   repeatMode: RepeatMode;
   playbackOrder: PlaybackOrder;
   queue: { id: string }[];
+  /** Shuffle replaces the upcoming order, so that one progress post includes the queue. */
+  includeQueue?: boolean;
 }): PlaybackStartInfo {
   const body: PlaybackStartInfo = {
     itemId: input.itemId,
@@ -25,7 +27,7 @@ export function buildPlayingBody(input: {
     repeatMode: input.repeatMode,
     playbackOrder: input.playbackOrder,
   };
-  if (input.kind === 'start') {
+  if (input.kind === 'start' || input.includeQueue) {
     body.nowPlayingQueue = input.queue;
   }
   return body;

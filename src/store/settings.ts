@@ -27,8 +27,8 @@ type SettingsState = {
 export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
-      quality: 'high',
-      themeId: 'dark',
+      quality: 'original',
+      themeId: 'system',
       accentId: 'theme',
       playAllLimit: DEFAULT_PLAY_ALL_LIMIT,
       lastServerUrl: '',
@@ -45,8 +45,16 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: 'jellyfy.settings',
-      version: 1,
+      version: 2,
       storage: createJSONStorage(() => AsyncStorage),
+      migrate: (persisted, version) => {
+        const saved = { ...((persisted ?? {}) as Partial<SettingsState>) };
+        if (version < 2) {
+          if (saved.quality === 'high') saved.quality = 'original';
+          if (saved.themeId === 'dark') saved.themeId = 'system';
+        }
+        return saved;
+      },
       partialize: (state) => ({
         quality: state.quality,
         themeId: state.themeId,

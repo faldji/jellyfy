@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
-import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useLyrics } from '@/api/hooks';
 import type { LyricDto } from '@/api/types';
 import { IconButton } from '@/components/IconButton';
 import { spacing } from '@/constants/theme';
-import { SheetGrabber, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
+import { SheetBackdrop, SheetGrabber, SheetSurface, useSwipeDownClose } from '@/hooks/use-swipe-down-close';
 import { colorFromId } from '@/lib/hash-color';
 import { usePlayer } from '@/store/player';
 
@@ -53,10 +52,15 @@ export function LyricsCard({ open, onClose }: Props) {
   const position = usePlayer((s) => s.position);
   const lyrics = useLyrics(current?.id, Boolean(current && open));
   const insets = useSafeAreaInsets();
-  const { gesture, style } = useSwipeDownClose(onClose, open);
+  const { gesture, style, backdropStyle, dismiss } = useSwipeDownClose(onClose, {
+    active: open,
+    animateIn: true,
+  });
   const scrollRef = useRef<ScrollView>(null);
   const lineYs = useRef<Record<number, number>>({});
   const follow = useRef(true);
+  const activeRef = useRef(-1);
+  const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const trackId = current?.id;
   const lines = useMemo(() => linesFromDto(lyrics.data), [lyrics.data]);
@@ -71,16 +75,44 @@ export function LyricsCard({ open, onClose }: Props) {
     return index;
   }, [lines, position, synced]);
 
+  activeRef.current = activeIndex;
+
+  const jumpTo = (index: number) => {
+    const y = lineYs.current[index];
+    if (y == null) return;
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - 120), animated: true });
+  };
+
+  const clearResume = () => {
+    if (!resumeTimer.current) return;
+    clearTimeout(resumeTimer.current);
+    resumeTimer.current = null;
+  };
+
+  const pauseFollow = () => {
+    follow.current = false;
+    clearResume();
+  };
+
+  const scheduleResume = () => {
+    clearResume();
+    resumeTimer.current = setTimeout(() => {
+      follow.current = true;
+      jumpTo(activeRef.current);
+    }, 2500);
+  };
+
+  useEffect(() => () => clearResume(), []);
+
   useEffect(() => {
     lineYs.current = {};
     follow.current = true;
+    clearResume();
   }, [trackId]);
 
   useEffect(() => {
     if (!follow.current || !open || activeIndex < 0) return;
-    const y = lineYs.current[activeIndex];
-    if (y == null) return;
-    scrollRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
+    jumpTo(activeIndex);
   }, [activeIndex, open]);
 
   if (!current) return null;
@@ -90,19 +122,24 @@ export function LyricsCard({ open, onClose }: Props) {
   const empty = !loading && (lyrics.isError || lines.length === 0);
 
   return (
-    <Modal visible={open} animationType="slide" onRequestClose={onClose}>
+    <Modal
+      visible={open}
+      transparent
+      animationType="none"
+      onRequestClose={dismiss}
+      presentationStyle="overFullScreen"
+      statusBarTranslucent>
+      {open ? (
       <GestureHandlerRootView style={styles.fill}>
-        <Animated.View
-          style={[
-            styles.sheet,
-            style,
-            { backgroundColor: bg, paddingTop: insets.top + 2, paddingBottom: insets.bottom + 16 },
-          ]}>
+        <SheetBackdrop style={backdropStyle} />
+        <SheetSurface
+          wash={bg}
+          style={[styles.sheet, style, { paddingTop: insets.top + 2, paddingBottom: insets.bottom + 16 }]}>
           <GestureDetector gesture={gesture}>
             <View>
               <SheetGrabber color="rgba(255,255,255,0.7)" />
               <View style={styles.sheetNav}>
-                <IconButton name="chevron-down" color="#fff" accessibilityLabel="Close lyrics" onPress={onClose} />
+                <IconButton name="chevron-down" color="#fff" accessibilityLabel="Close lyrics" onPress={dismiss} />
                 <Text style={styles.sheetTitle} numberOfLines={1}>
                   {current.name}
                 </Text>
@@ -122,9 +159,9 @@ export function LyricsCard({ open, onClose }: Props) {
           ) : (
             <ScrollView
               ref={scrollRef}
-              onScrollBeginDrag={() => {
-                follow.current = false;
-              }}
+              onScrollBeginDrag={pauseFollow}
+              onScrollEndDrag={scheduleResume}
+              onMomentumScrollEnd={scheduleResume}
               contentContainerStyle={styles.lines}>
               {lines.map((line) => (
                 <Text
@@ -141,14 +178,15 @@ export function LyricsCard({ open, onClose }: Props) {
           {!loading && !empty ? (
             <Text style={styles.hint}>{synced ? 'Synced lyrics' : 'Lyrics'}</Text>
           ) : null}
-        </Animated.View>
+        </SheetSurface>
       </GestureHandlerRootView>
+      ) : null}
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
+  fill: { flex: 1, backgroundColor: 'transparent' },
   sheet: { flex: 1 },
   sheetNav: {
     flexDirection: 'row',

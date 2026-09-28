@@ -7,7 +7,8 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { authorizationHeader } from '@/api/client';
-import { useArtistTracks, useFavoriteMutation, useFansAlsoLike, useItem, useItems, useMusicParent, musicScope } from '@/api/hooks';
+import { useArtistTrackPages, useFavoriteMutation, useFansAlsoLike, useInfiniteItems, useItem, useMusicParent, musicScope } from '@/api/hooks';
+import { COLLECTION_PAGE } from '@/api/paging';
 import { imageUrl } from '@/api/jellyfin';
 import { ActionSheet } from '@/components/ActionSheet';
 import { IconButton } from '@/components/IconButton';
@@ -17,6 +18,7 @@ import { HorizontalRail, Section } from '@/components/Section';
 import { TrackRow } from '@/components/TrackRow';
 import { useTrackActions } from '@/components/useTrackActions';
 import { spacing } from '@/constants/theme';
+import { nearListEnd } from '@/lib/near-list-end';
 import { closeOverlay, hrefForItem } from '@/lib/navigation';
 import { rankPopularTracks, sortAlbumsLatest } from '@/lib/popular-tracks';
 import { useNowPlayingPadding } from '@/components/MiniPlayer';
@@ -34,28 +36,27 @@ export default function ArtistScreen() {
   const parentId = useMusicParent();
   const artist = useItem(id);
   const favorite = useFavoriteMutation();
-  const albums = useItems(
+  const albums = useInfiniteItems(
     ['artist-albums', id],
     {
       albumArtistIds: id ? [id] : undefined,
       includeItemTypes: ['MusicAlbum'],
       sortBy: ['PremiereDate', 'ProductionYear', 'DateCreated'],
       sortOrder: 'Descending',
-      limit: 80,
-      enableTotalRecordCount: true,
       ...musicScope(parentId),
     },
-    Boolean(id)
+    { enabled: Boolean(id), pageSize: COLLECTION_PAGE }
   );
-  const catalog = useArtistTracks(id, 200);
+  const catalog = useArtistTrackPages(id);
   const fansAlsoLike = useFansAlsoLike(id);
   const playItems = usePlayer((s) => s.playItems);
+  const playItem = usePlayer((s) => s.playItem);
   const actions = useTrackActions();
-  const songs = useMemo(
-    () => rankPopularTracks(catalog.data ?? [], id ?? '', 5),
-    [id, catalog.data]
+  const catalogSongs = useMemo(
+    () => catalog.data?.pages.flatMap((page) => page.items ?? []) ?? [],
+    [catalog.data]
   );
-  const catalogSongs = catalog.data?.length ? catalog.data : songs;
+  const songs = useMemo(() => rankPopularTracks(catalogSongs, id ?? '', 5), [catalogSongs, id]);
   const collection = useCollectionPlayback(
     id,
     catalogSongs,
@@ -66,15 +67,22 @@ export default function ArtistScreen() {
   const hero = session && artist.data ? imageUrl(session, artist.data, 900, { tokenInQuery: false }) : null;
   const [showAllAlbums, setShowAllAlbums] = useState(false);
   const allAlbums = useMemo(
-    () => sortAlbumsLatest(albums.data?.items ?? []),
-    [albums.data?.items]
+    () => sortAlbumsLatest(albums.data?.pages.flatMap((page) => page.items ?? []) ?? []),
+    [albums.data]
   );
   const albumPreview = 5;
   const visibleAlbums = showAllAlbums ? allAlbums : allAlbums.slice(0, albumPreview);
-  const moreAlbums = allAlbums.length > albumPreview;
+  const moreAlbums = allAlbums.length > albumPreview || albums.hasNextPage;
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: c.bg }} contentContainerStyle={{ paddingBottom: bottomPad }}>
+    <ScrollView
+      style={{ flex: 1, backgroundColor: c.bg }}
+      contentContainerStyle={{ paddingBottom: bottomPad }}
+      scrollEventThrottle={16}
+      onScroll={(event) => {
+        if (!showAllAlbums || !nearListEnd(event) || !albums.hasNextPage || albums.isFetchingNextPage) return;
+        void albums.fetchNextPage();
+      }}>
       <View style={styles.hero}>
         {hero ? (
           <Image
@@ -122,9 +130,24 @@ export default function ArtistScreen() {
           onPress={() => id && router.push({ pathname: '/radio/[id]', params: { id } })}
         />
         <View style={{ flex: 1 }} />
-        <IconButton name="shuffle" color={c.accent} accessibilityLabel="Shuffle" onPress={collection.shuffle} />
+        <IconButton
+          name="shuffle"
+          color={c.accent}
+          accessibilityLabel="Shuffle"
+          onPress={() => {
+            if (collection.busy) return;
+            if (artist.data) void playItem(artist.data, { shuffle: true, contextId: id });
+          }}
+        />
         <Pressable
-          onPress={collection.play}
+          onPress={() => {
+            if (collection.busy) return;
+            if (collection.active) {
+              collection.play();
+              return;
+            }
+            if (artist.data) void playItem(artist.data, { contextId: id });
+          }}
           style={[styles.play, { backgroundColor: c.accent }]}
           accessibilityLabel={collection.busy ? 'Loading' : collection.playing ? 'Pause' : 'Play'}>
           {collection.busy ? (
@@ -156,7 +179,16 @@ export default function ArtistScreen() {
       {visibleAlbums.length ? (
         <Section
           title="Albums"
-          onSeeAll={moreAlbums && !showAllAlbums ? () => setShowAllAlbums(true) : undefined}>
+          onSeeAll={
+            moreAlbums && !showAllAlbums
+              ? () => {
+                  setShowAllAlbums(true);
+                  if (allAlbums.length <= albumPreview && albums.hasNextPage && !albums.isFetchingNextPage) {
+                    void albums.fetchNextPage();
+                  }
+                }
+              : undefined
+          }>
           {visibleAlbums.map((item) => (
             <LibraryRow
               key={item.id}
@@ -165,6 +197,9 @@ export default function ArtistScreen() {
               onPress={() => router.push(hrefForItem(item))}
             />
           ))}
+          {showAllAlbums && albums.isFetchingNextPage ? (
+            <ActivityIndicator color={c.text} style={{ marginVertical: 12 }} />
+          ) : null}
         </Section>
       ) : null}
 

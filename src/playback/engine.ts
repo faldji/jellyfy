@@ -7,7 +7,7 @@ import {
   type AudioSample,
   type AudioStatus,
 } from 'expo-audio';
-import { Platform } from 'react-native';
+import { Appearance, Platform } from 'react-native';
 
 import { createApi, imageUrl, streamHeaders, streamUrl, type Session } from '@/api/jellyfin';
 import { fetchAlbumTracks, fetchArtistTracks, fetchPlaylistTracks } from '@/api/library';
@@ -16,12 +16,13 @@ import { queryClient } from '@/api/query';
 import { queryKeys } from '@/api/query-keys';
 import { fetchSrNext, fetchSrRadio, hydrateSrTracks, isSrEnabled, postSrEventSafe } from '@/api/sr';
 import type { BaseItem, PlaybackOrder, PlayMethod, RepeatMode } from '@/api/types';
-import { takeCachedTracks } from '@/lib/derive-media';
+import { COLLECTION_PAGE, takeLoadedPages } from '@/api/paging';
 import { artistLine, secondsToTicks, ticksToSeconds } from '@/lib/format';
 import { createPlaySessionId, sameId } from '@/lib/ids';
+import { logger } from '@/lib/logger';
 import { isAudio } from '@/lib/media';
 import { rangeContaining } from '@/lib/media-buffer';
-import { resolvePlayAllLimit } from '@/lib/play-all';
+import { resolvePlayAllLimit, takePlayAll } from '@/lib/play-all';
 import {
   acceptCompletion,
   armCompletion,
@@ -33,7 +34,19 @@ import {
   type CompletionGate,
 } from '@/playback/advance';
 import { silenceHtmlAudio } from '@/playback/html-audio';
-import { bindMediaSessionSkip } from '@/playback/media-session';
+import { bindMediaSessionTransport } from '@/playback/media-session';
+import {
+  acceptRemoteSkip,
+  classifyRemoteSeek,
+  cycleRepeatMode,
+  isExternalSeek,
+  lockScreenControls,
+  repeatModeFromRemote,
+  shuffleFromRemote,
+  wallFromPlayerClock,
+  type RemoteSeekDecision,
+  type RepeatModeName,
+} from '@/playback/remote';
 import { buildPlayingBody } from '@/playback/report';
 import {
   isNativeLoopWrap,
@@ -50,6 +63,7 @@ import { useDownloads } from '@/store/downloads';
 import { useRecents } from '@/store/recents';
 import { useSettings } from '@/store/settings';
 import { useToast } from '@/store/toast';
+import { resolveColors } from '@/theme/palettes';
 
 export type RepeatModeUi = 'off' | 'all' | 'one';
 
@@ -212,6 +226,8 @@ export class PlaybackEngine {
   private repeat: RepeatModeUi = 'off';
   private playSessionId: string | null = null;
   private lastProgressAt = 0;
+  private lastProgressPostAt = 0;
+  private lastPostedPaused: boolean | null = null;
   private reportedStartFor: string | null = null;
   private listeners = new Set<Listener>();
   private error: string | null = null;
@@ -244,14 +260,41 @@ export class PlaybackEngine {
   private lastEmittedBuffered = -1;
   private sampleListeners = new Set<(levels: number[]) => void>();
   private sampleUnsub: { remove: () => void } | null = null;
-  /** After a track change, force the element back to 0 if replace() kept the old currentTime. */
+  /** After a track change, the first status can still carry the previous item's currentTime. */
   private resetPlayhead = false;
   /** Repeat-one already posted REPLAY; do not also post PLAY_START. */
   private emitSrOnStart = true;
+  /** Track id that already emitted PLAY_START for this load. */
+  private srStartFor: string | null = null;
   private lastMediaTime = 0;
+  private lastMediaAt = 0;
+  /** Wall-clock target of a lock-screen scrub until the player clock catches up. */
+  private externalSeekWall: number | null = null;
+  /** Ignore playhead jumps caused by our own seek or replace. */
+  private suppressRemoteSeekUntil = 0;
+  private lastRemoteSkipAt = 0;
+  /** Lock-screen next/previous stays busy until the new track is actually loaded. */
+  private remoteNavBusy = false;
+  private lastRemoteShuffleAt = 0;
+  private lastRemoteRepeatAt = 0;
+  /** Item whose lock-screen duration was already published. Avoids a second seek on every duration tick. */
+  private publishedForItem: string | null = null;
+  /** This load has produced a real playing tick, so a stale `didJustFinish` cannot skip again. */
+  private heardLoadGen = -1;
+  /** Playhead was observed near 0 for this open, so a leftover end position is not completion. */
+  private heardStart = false;
+  /** When the current source was opened. System catch-up seeks land just after this. */
+  private openedAt = 0;
+  /** Position of the item we just left. A session resync seeks back here. */
+  private staleSeekWall: number | null = null;
+  private remoteNavToken = 0;
+  private remoteUnsub: { remove: () => void } | null = null;
+  private lockScreenOwned = false;
   private moveGen = 0;
   private transition: Promise<void> = Promise.resolve();
-  private leftTrackId: string | null = null;
+  /** One SR leave per visit. Re-armed when the track is entered or replayed. */
+  private leaveTicket = 0;
+  private consumedLeave = -1;
   private queued: BaseItem[] | null = null;
   private reportChain: Promise<void> = Promise.resolve();
 
@@ -346,6 +389,7 @@ export class PlaybackEngine {
     this.unsub = this.player.addListener('playbackStatusUpdate', (status) => {
       this.onStatus(status);
     });
+    this.bindRemoteEvents();
     this.ensureSampling();
 
     if (this.source.length === 0) {
@@ -379,11 +423,13 @@ export class PlaybackEngine {
     this.htmlBufferUnsub = null;
     this.unsub?.remove();
     this.unsub = null;
+    this.remoteUnsub?.remove();
+    this.remoteUnsub = null;
     this.wantPlaying = false;
     silenceHtmlAudio();
+    this.clearLockScreen();
     try {
       this.player?.pause();
-      this.player?.clearLockScreenControls();
       this.player?.remove();
     } catch {
       // Player may already be released.
@@ -419,8 +465,11 @@ export class PlaybackEngine {
     this.preparing = false;
     this.error = null;
     this.reportedStartFor = null;
+    this.srStartFor = null;
+    this.externalSeekWall = null;
     this.completion = idleCompletionGate();
     silenceHtmlAudio();
+    this.clearLockScreen();
     try {
       this.player?.pause();
     } catch {
@@ -497,7 +546,8 @@ export class PlaybackEngine {
 
   /** Play a collection that is already in memory, capped by the play-all setting. */
   async playCollection(items: BaseItem[], options?: PlayItemsOptions) {
-    const tracks = items.filter(isAudio);
+    const shuffle = options?.shuffle ?? this.shuffle;
+    const tracks = takePlayAll(items, useSettings.getState().playAllLimit, shuffle);
     if (!tracks.length) {
       if (options?.seed && isMixContext(options.contextId)) {
         await this.playMix(options.seed, options);
@@ -509,9 +559,7 @@ export class PlaybackEngine {
       }
       return;
     }
-    const cap = resolvePlayAllLimit(useSettings.getState().playAllLimit);
-    const picked = tracks.slice(0, cap);
-    await this.playItems(picked, 0, options);
+    await this.playItems(tracks, 0, options);
   }
 
   /** Radio / “This Is” only. Instant Mix is never used for a direct artist/album/playlist play. */
@@ -639,6 +687,17 @@ export class PlaybackEngine {
     return resolvePlayAllLimit(useSettings.getState().playAllLimit);
   }
 
+  /** Pages already scrolled, or a previous play of this same cap. */
+  private cachedCollection(pagesKey: readonly unknown[], playKey: readonly unknown[], limit: number): BaseItem[] | null {
+    const paged = queryClient.getQueryData<{ pages?: { items?: BaseItem[] | null; totalRecordCount?: number }[] }>(
+      pagesKey
+    );
+    const fromPages = takeLoadedPages(paged?.pages, limit, COLLECTION_PAGE);
+    if (fromPages) return fromPages;
+    const played = queryClient.getQueryData<BaseItem[]>(playKey);
+    return played ? played.slice(0, limit) : null;
+  }
+
   private async tracksForItem(item: BaseItem): Promise<BaseItem[]> {
     const session = this.session;
     if (!session) return [];
@@ -646,46 +705,55 @@ export class PlaybackEngine {
     const limit = this.playAllCap();
     const userId = session.userId;
     if (item.type === 'Playlist') {
-      const cached = takeCachedTracks(
-        queryClient.getQueryData<BaseItem[]>(queryKeys.playlistItems.detail(userId, item.id)),
+      const cached = this.cachedCollection(
+        queryKeys.playlistItems.pages(userId, item.id, COLLECTION_PAGE),
+        queryKeys.playlistItems.play(userId, item.id, limit),
         limit
       );
       if (cached) {
         emitNet({ method: 'GET', path: `/Playlists/${item.id}/Items`, ms: 0, cacheHit: true });
         return cached;
       }
-      return queryClient.fetchQuery({
-        queryKey: queryKeys.playlistItems.detail(userId, item.id),
-        queryFn: () => fetchPlaylistTracks(api, item.id, Math.max(limit, 2000)),
-      }).then((tracks) => tracks.slice(0, limit));
+      return queryClient
+        .fetchQuery({
+          queryKey: queryKeys.playlistItems.play(userId, item.id, limit),
+          queryFn: () => fetchPlaylistTracks(api, item.id, limit),
+        })
+        .then((tracks) => tracks.slice(0, limit));
     }
     if (item.type === 'MusicAlbum') {
-      const cached = takeCachedTracks(
-        queryClient.getQueryData<BaseItem[]>(queryKeys.albumTracks.detail(userId, item.id)),
+      const cached = this.cachedCollection(
+        queryKeys.albumTracks.pages(userId, item.id, COLLECTION_PAGE),
+        queryKeys.albumTracks.play(userId, item.id, limit),
         limit
       );
       if (cached) {
         emitNet({ method: 'GET', path: `/Items`, ms: 0, cacheHit: true, action: 'album-play' });
         return cached;
       }
-      return queryClient.fetchQuery({
-        queryKey: queryKeys.albumTracks.detail(userId, item.id),
-        queryFn: () => fetchAlbumTracks(api, item.id, Math.max(limit, 500)),
-      }).then((tracks) => tracks.slice(0, limit));
+      return queryClient
+        .fetchQuery({
+          queryKey: queryKeys.albumTracks.play(userId, item.id, limit),
+          queryFn: () => fetchAlbumTracks(api, item.id, limit),
+        })
+        .then((tracks) => tracks.slice(0, limit));
     }
     if (item.type === 'MusicArtist') {
-      const cached = takeCachedTracks(
-        queryClient.getQueryData<BaseItem[]>(queryKeys.artistTracks.detail(userId, item.id)),
+      const cached = this.cachedCollection(
+        queryKeys.artistTracks.pages(userId, item.id, COLLECTION_PAGE),
+        queryKeys.artistTracks.play(userId, item.id, limit),
         limit
       );
       if (cached) {
         emitNet({ method: 'GET', path: `/Items`, ms: 0, cacheHit: true, action: 'artist-play' });
         return cached;
       }
-      return queryClient.fetchQuery({
-        queryKey: queryKeys.artistTracks.detail(userId, item.id),
-        queryFn: () => fetchArtistTracks(api, item.id, Math.max(limit, 200)),
-      }).then((tracks) => tracks.slice(0, limit));
+      return queryClient
+        .fetchQuery({
+          queryKey: queryKeys.artistTracks.play(userId, item.id, limit),
+          queryFn: () => fetchArtistTracks(api, item.id, limit),
+        })
+        .then((tracks) => tracks.slice(0, limit));
     }
     return [];
   }
@@ -785,6 +853,15 @@ export class PlaybackEngine {
   }
 
   async pause() {
+    if (!this.wantPlaying) {
+      silenceHtmlAudio();
+      try {
+        this.player?.pause();
+      } catch {
+        // Player may already be released.
+      }
+      return;
+    }
     this.wantPlaying = false;
     silenceHtmlAudio();
     this.player?.pause();
@@ -793,7 +870,23 @@ export class PlaybackEngine {
     this.emit();
   }
 
+  /** Play if paused. A second play command from the lock screen does not pause. */
+  async resume() {
+    if (this.preparing) return;
+    if (!this.wantPlaying) {
+      await this.togglePlay();
+      return;
+    }
+    await this.safePlay();
+  }
+
+  /** Seek using the player clock. A transcoded stream's 0 is `startOffset` into the song. */
+  async seekFromPlayerClock(mediaSeconds: number) {
+    await this.seek(wallFromPlayerClock(mediaSeconds, this.startOffset));
+  }
+
   async next() {
+    this.holdRemoteNav();
     return this.enqueueTransition((gen) => this.nextImpl(gen));
   }
 
@@ -807,11 +900,33 @@ export class PlaybackEngine {
       () => undefined,
       () => undefined
     );
+    void run.finally(() => {
+      if (gen === this.moveGen) this.releaseRemoteNavSoon();
+    });
     return run;
+  }
+
+  /** Swallow the system's extra next/previous while this skip is still opening. */
+  private holdRemoteNav() {
+    this.remoteNavBusy = true;
+    this.remoteNavToken += 1;
+  }
+
+  private releaseRemoteNavSoon() {
+    const token = this.remoteNavToken;
+    setTimeout(() => {
+      if (token === this.remoteNavToken) this.remoteNavBusy = false;
+    }, 900);
+  }
+
+  private rememberStaleWall() {
+    const wall = this.displayPosition();
+    this.staleSeekWall = wall > 0.5 ? wall : null;
   }
 
   private async nextImpl(gen: number) {
     if (this.order.length === 0) return;
+    this.rememberStaleWall();
     const leaving = this.currentItem();
     const naturalEnd = this.endedHandled;
     this.leaveCurrent(naturalEnd);
@@ -823,6 +938,7 @@ export class PlaybackEngine {
     if (decision.action === 'replay') {
       this.emitSrReplay(leaving);
       this.emitSrOnStart = false;
+      this.armLeave();
       this.endedHandled = false;
       this.advancing = false;
       this.wantPlaying = true;
@@ -849,6 +965,7 @@ export class PlaybackEngine {
       this.emit();
       return;
     }
+    if (gen !== this.moveGen) return;
     this.releaseSession();
     this.index = decision.index;
     this.queued = null;
@@ -857,10 +974,14 @@ export class PlaybackEngine {
     await this.loadCurrent(true);
   }
 
+  private armLeave() {
+    this.leaveTicket += 1;
+  }
+
   private leaveCurrent(naturalEnd = false) {
     const leaving = this.currentItem();
-    if (!leaving || this.leftTrackId === leaving.id) return;
-    this.leftTrackId = leaving.id;
+    if (!leaving || this.consumedLeave === this.leaveTicket) return;
+    this.consumedLeave = this.leaveTicket;
     this.emitSrLeave(leaving, this.displayPosition(), this.displayDuration(), naturalEnd);
   }
 
@@ -917,18 +1038,21 @@ export class PlaybackEngine {
 
   async previous() {
     if (this.order.length === 0) return;
-    if (this.displayPosition() > 3) {
-      await this.seek(0);
+    const restart = this.displayPosition() > 3 || (this.index <= 0 && this.repeat !== 'all');
+    if (restart) {
+      this.holdRemoteNav();
+      try {
+        await this.seek(0);
+      } finally {
+        this.releaseRemoteNavSoon();
+      }
       return;
     }
-    const first = this.index <= 0;
-    if (first && this.repeat !== 'all') {
-      await this.seek(0);
-      return;
-    }
-    const target = first ? this.order.length - 1 : this.index - 1;
+    const target = this.index <= 0 ? this.order.length - 1 : this.index - 1;
+    this.rememberStaleWall();
+    this.holdRemoteNav();
     return this.enqueueTransition(async (gen) => {
-      if (this.index === target) return;
+      if (gen !== this.moveGen || this.index === target) return;
       this.completion = disarmCompletion(this.loadGen);
       this.leaveCurrent(false);
       this.releaseSession();
@@ -964,9 +1088,11 @@ export class PlaybackEngine {
   async skipTo(index: number) {
     if (index < 0 || index >= this.order.length) return;
     if (index === this.index) return;
+    this.rememberStaleWall();
+    this.holdRemoteNav();
     this.completion = disarmCompletion(this.loadGen);
     return this.enqueueTransition(async (gen) => {
-      if (index === this.index) return;
+      if (gen !== this.moveGen || index === this.index) return;
       this.leaveCurrent(false);
       this.releaseSession();
       this.index = index;
@@ -982,6 +1108,7 @@ export class PlaybackEngine {
     const duration = this.displayDuration();
     const target = Math.max(0, duration > 0 ? Math.min(seconds, Math.max(0, duration - 0.15)) : seconds);
     const resume = this.wantPlaying;
+    this.suppressRemoteSeekUntil = Date.now() + 1600;
     this.ignoreEndUntil = Date.now() + 1600;
     this.endedHandled = true;
     this.pendingSeek = target;
@@ -1003,6 +1130,8 @@ export class PlaybackEngine {
             ? { ...this.player.currentStatus, currentTime: landed, didJustFinish: false }
             : this.lastStatus;
           this.endedHandled = false;
+          this.lastMediaTime = landed;
+          this.lastMediaAt = Date.now();
           this.lastPos = canFileSeek ? landed : this.startOffset + landed;
           this.lastPosAt = Date.now();
           if (resume) this.player.play();
@@ -1019,9 +1148,18 @@ export class PlaybackEngine {
     await this.report('progress', !resume);
   }
 
+  async setShuffle(enabled: boolean) {
+    if (this.shuffle === enabled) {
+      this.publishTransport();
+      return;
+    }
+    await this.toggleShuffle();
+  }
+
   async toggleShuffle() {
     if (this.source.length === 0) {
       this.shuffle = !this.shuffle;
+      this.publishTransport();
       this.emit();
       return;
     }
@@ -1034,16 +1172,27 @@ export class PlaybackEngine {
       this.order = identityOrder(this.source.length);
       this.index = sourceIndex;
     }
+    this.publishTransport();
     this.emit();
-    await this.report('progress', !this.wantPlaying);
+    await this.report('progress', !this.wantPlaying, true);
   }
 
-  cycleRepeat() {
-    this.repeat = this.repeat === 'off' ? 'all' : this.repeat === 'all' ? 'one' : 'off';
+  setRepeat(mode: RepeatModeName) {
+    if (this.repeat === mode) {
+      this.publishTransport();
+      return;
+    }
+    this.repeat = mode;
     // Native loop swallows ended() and leaves currentTime at duration across replace().
     // Repeat-one is handled in software so REPLAY fires and skip-to-next can start at 0.
     if (this.player) this.player.loop = false;
+    this.publishTransport();
     this.emit();
+    void this.report('progress', !this.wantPlaying);
+  }
+
+  cycleRepeat() {
+    this.setRepeat(cycleRepeatMode(this.repeat));
   }
 
   removeAt(index: number) {
@@ -1061,6 +1210,7 @@ export class PlaybackEngine {
       this.wantPlaying = false;
       silenceHtmlAudio();
       this.player?.pause();
+      this.clearLockScreen();
       void this.clearPersisted();
       this.emit();
       return;
@@ -1119,6 +1269,10 @@ export class PlaybackEngine {
   }
 
   private displayPosition(): number {
+    if (this.externalSeekWall != null) {
+      const landed = this.startOffset + this.mediaTime();
+      if (Math.abs(landed - this.externalSeekWall) > 1.25) return this.externalSeekWall;
+    }
     const media = this.startOffset + this.mediaTime();
     if (this.resetPlayhead && this.mediaTime() > 1.25) {
       return Math.max(0, this.pendingSeek);
@@ -1291,6 +1445,8 @@ export class PlaybackEngine {
       }
       this.pendingSeek = 0;
       this.startOffset = 0;
+      this.lastMediaTime = landed;
+      this.lastMediaAt = Date.now();
       this.lastStatus = this.player.currentStatus
         ? { ...this.player.currentStatus, currentTime: landed, didJustFinish: false }
         : this.lastStatus;
@@ -1350,17 +1506,24 @@ export class PlaybackEngine {
     this.advancing = true;
     this.endedHandled = true;
     this.ignoreEndUntil = Date.now() + 2500;
+    this.suppressRemoteSeekUntil = Date.now() + 4_000;
+    this.openedAt = Date.now();
+    this.heardStart = false;
     this.completion = armCompletion(gen, item.id);
     this.lastPos = startSeconds;
     this.lastPosAt = Date.now();
     this.lastMediaTime = 0;
+    this.lastMediaAt = Date.now();
+    this.externalSeekWall = null;
     this.lastStatus = null;
     this.resetPlayhead = startSeconds <= 0.05;
     if (gen !== this.loadGen) return;
     if (this.playSessionId) this.releaseSession();
     this.playSessionId = createPlaySessionId();
     this.reportedStartFor = null;
-    this.leftTrackId = null;
+    this.srStartFor = null;
+    this.emitSrOnStart = true;
+    this.armLeave();
 
     const downloaded = useDownloads.getState().isDownloaded(item.id)
       ? useDownloads.getState().items[item.id]
@@ -1387,6 +1550,7 @@ export class PlaybackEngine {
       this.sourceObjectUrl = null;
       try {
         this.replaceSource({ uri, headers, name: item.name });
+        this.applyLockScreen(item);
         if (this.wantPlaying) void this.safePlay();
         else player.pause();
         this.bindHtmlBufferWatch();
@@ -1415,6 +1579,7 @@ export class PlaybackEngine {
         let gotChunk = false;
         this.replaceSource({ uri: handle.objectUrl, name: item.name });
         revokeMediaSourceUrl(staleUrl);
+        this.applyLockScreen(item);
         void pumpIntoMediaSource({
           mediaSource: handle.mediaSource,
           url: uri,
@@ -1478,17 +1643,164 @@ export class PlaybackEngine {
     const player = this.player;
     if (!session || !player) return;
     const artworkUrl = imageUrl(session, item, 600) ?? undefined;
+    const metadata = {
+      title: item.name,
+      artist: artistLine(item),
+      albumTitle: item.album,
+      artworkUrl,
+    };
     try {
-      player.setActiveForLockScreen(true, {
-        title: item.name,
-        artist: artistLine(item),
-        albumTitle: item.album,
-        artworkUrl,
-      });
+      if (this.lockScreenOwned) {
+        player.updateLockScreenMetadata(metadata);
+      } else {
+        player.setActiveForLockScreen(true, metadata, lockScreenControls(this.transportState()));
+        this.lockScreenOwned = true;
+      }
     } catch (error) {
-      console.warn('Failed to activate lock-screen controls', error);
+      logger.warn('Failed to activate lock-screen controls', { error });
     }
-    bindMediaSessionSkip(this);
+    bindMediaSessionTransport(this);
+    this.publishTransport();
+  }
+
+  private transportState() {
+    const settings = useSettings.getState();
+    const scheme = Appearance.getColorScheme() === 'light' ? 'light' : 'dark';
+    const colors = resolveColors(settings.themeId ?? 'system', settings.accentId ?? 'theme', scheme);
+    const durationMs = Math.max(0, Math.round(this.displayDuration() * 1000));
+    this.publishedForItem = this.currentItem()?.id ?? null;
+    return {
+      shuffle: this.shuffle,
+      repeat: this.repeat,
+      durationMs,
+      positionOffsetMs: Math.max(0, Math.round(this.startOffset * 1000)),
+      accentColor: colors.accent,
+      iconColor: colors.text,
+      mutedColor: colors.textSub,
+    };
+  }
+
+  private publishTransport() {
+    const player = this.player as (AudioPlayer & {
+      updateLockScreenTransport?: (
+        shuffleEnabled: boolean,
+        repeatMode: RepeatModeName,
+        durationMs: number,
+        positionOffsetMs: number,
+        accentColor: string,
+        iconColor: string,
+        mutedColor: string
+      ) => void;
+    }) | null;
+    const state = this.transportState();
+    try {
+      player?.updateLockScreenTransport?.(
+        state.shuffle,
+        state.repeat,
+        state.durationMs,
+        state.positionOffsetMs,
+        state.accentColor,
+        state.iconColor,
+        state.mutedColor
+      );
+    } catch {
+      // The dev client must be rebuilt before this native method exists.
+    }
+  }
+
+  private clearLockScreen() {
+    this.lockScreenOwned = false;
+    try {
+      this.player?.clearLockScreenControls();
+    } catch {
+      // Player may already be released.
+    }
+  }
+
+  private bindRemoteEvents() {
+    this.remoteUnsub?.remove();
+    this.remoteUnsub = null;
+    const player = this.player;
+    if (!player || Platform.OS === 'web') return;
+    const remote = player as unknown as {
+      addListener: (
+        event: string,
+        listener: (payload?: { position?: number; enabled?: boolean; mode?: string; perform?: boolean | number }) => void
+      ) => { remove: () => void };
+    };
+    const onSkip = (direction: 'next' | 'previous') => {
+      const now = Date.now();
+      if (this.remoteNavBusy || this.advancing || !acceptRemoteSkip(this.lastRemoteSkipAt, now)) return;
+      this.lastRemoteSkipAt = now;
+      if (direction === 'next') void this.userNext();
+      else void this.previous();
+    };
+    const subs = [
+      remote.addListener('onRemoteNextTrack', () => onSkip('next')),
+      remote.addListener('onRemotePreviousTrack', () => onSkip('previous')),
+      remote.addListener('onRemoteShuffle', (payload) => {
+        const now = Date.now();
+        if (!acceptRemoteSkip(this.lastRemoteShuffleAt, now)) return;
+        this.lastRemoteShuffleAt = now;
+        void this.setShuffle(shuffleFromRemote(payload?.enabled, this.shuffle));
+      }),
+      remote.addListener('onRemoteRepeat', (payload) => {
+        const now = Date.now();
+        if (!acceptRemoteSkip(this.lastRemoteRepeatAt, now)) return;
+        this.lastRemoteRepeatAt = now;
+        this.setRepeat(repeatModeFromRemote(payload?.mode, this.repeat));
+      }),
+      remote.addListener('onRemoteSeek', (payload) => {
+        const position = payload?.position;
+        if (typeof position !== 'number' || !Number.isFinite(position)) return;
+        const perform = payload?.perform === true || payload?.perform === 1;
+        const decision = this.remoteSeekDecision(position, perform);
+        if (decision === 'reopen') {
+          void this.seek(wallFromPlayerClock(position, this.startOffset));
+          return;
+        }
+        if (decision === 'note') this.noteExternalSeek(position);
+      }),
+    ];
+    this.remoteUnsub = {
+      remove: () => {
+        subs.forEach((sub) => sub.remove());
+      },
+    };
+  }
+
+  private remoteSeekDecision(mediaSeconds: number, perform: boolean): RemoteSeekDecision {
+    return classifyRemoteSeek({
+      mediaSeconds,
+      startOffset: this.startOffset,
+      displayPosition: this.displayPosition(),
+      openedAgoMs: this.openedAt > 0 ? Date.now() - this.openedAt : Number.POSITIVE_INFINITY,
+      advancing: this.advancing,
+      suppressed: Date.now() < this.suppressRemoteSeekUntil,
+      perform,
+      staleWall: this.staleSeekWall,
+    });
+  }
+
+  /** Lock-screen scrub already moved the native playhead. Report that position; do not seek again. */
+  private noteExternalSeek(mediaSeconds: number) {
+    if (this.advancing || this.preparing || !this.currentItem()) return;
+    const now = Date.now();
+    if (now < this.suppressRemoteSeekUntil) return;
+    this.suppressRemoteSeekUntil = now + 900;
+    const wall = wallFromPlayerClock(mediaSeconds, this.startOffset);
+    const duration = this.displayDuration();
+    const clamped = duration > 0 ? Math.min(wall, Math.max(0, duration - 0.05)) : wall;
+    this.externalSeekWall = clamped;
+    const nearEnd = duration > 1 && clamped >= duration - 0.4;
+    if (!nearEnd) this.ignoreEndUntil = now + 1200;
+    this.lastPos = clamped;
+    this.lastPosAt = now;
+    this.lastMediaTime = Math.max(0, mediaSeconds);
+    this.lastMediaAt = now;
+    this.lastProgressAt = now;
+    void this.report('progress', !this.wantPlaying);
+    this.emit();
   }
 
   private onStatus(status: AudioStatus) {
@@ -1500,29 +1812,59 @@ export class PlaybackEngine {
     const requestedStart = this.startOffset > 0.05 ? this.startOffset : 0;
     const stuck = playheadLooksStuckAtEnd(
       status.currentTime,
-      status.duration,
-      status.didJustFinish,
+      this.openedAt > 0 ? Date.now() - this.openedAt : 0,
       requestedStart
     );
-    // resetPlayhead is only for replace() keeping the previous currentTime at
-    // the start of a track. A native complete after the ignore window is real.
-    if (this.resetPlayhead && stuck && !nativeComplete && Date.now() < this.ignoreEndUntil) {
-      if (this.player) {
-        void Promise.resolve(this.player.seekTo(0))
-          .then(() => {
-            if (this.wantPlaying) this.player?.play();
-          })
-          .catch(() => {});
-      }
+    // replace() reports the previous item's clock once. Seeking to 0 here
+    // rebuffers the new song and starts it again. Keep showing 0 until a real clock arrives.
+    if (this.resetPlayhead && stuck && !nativeComplete) {
       this.emit();
       return;
     }
-    if (this.resetPlayhead && !nativeComplete && status.currentTime <= 1.25) {
+    if (
+      this.resetPlayhead &&
+      !nativeComplete &&
+      status.currentTime <= 1.25 &&
+      this.openedAt > 0 &&
+      Date.now() - this.openedAt > 600
+    ) {
       this.resetPlayhead = false;
     }
 
     const prevMedia = this.lastMediaTime;
+    const prevAt = this.lastMediaAt;
     this.lastMediaTime = Number.isFinite(status.currentTime) ? status.currentTime : 0;
+    this.lastMediaAt = Date.now();
+    const trackId = this.currentItem()?.id ?? null;
+    if (trackId && trackId !== this.publishedForItem && this.displayDuration() > 0) {
+      this.publishTransport();
+    }
+    if (!nativeComplete && status.currentTime <= 1.25) this.heardStart = true;
+    if (status.playing && !nativeComplete && (this.heardStart || this.startOffset > 0.05)) {
+      this.heardLoadGen = this.loadGen;
+    }
+    if (
+      this.externalSeekWall != null &&
+      Math.abs(this.startOffset + this.lastMediaTime - this.externalSeekWall) <= 1.25
+    ) {
+      this.externalSeekWall = null;
+    }
+    if (
+      !nativeComplete &&
+      !this.advancing &&
+      !this.resetPlayhead &&
+      !this.preparing &&
+      this.pendingSeek <= 0.05 &&
+      Date.now() >= this.suppressRemoteSeekUntil &&
+      isExternalSeek({
+        previousMediaTime: prevMedia,
+        mediaTime: this.lastMediaTime,
+        elapsedMs: Date.now() - prevAt,
+      }) &&
+      this.remoteSeekDecision(this.lastMediaTime, false) === 'note'
+    ) {
+      this.noteExternalSeek(this.lastMediaTime);
+    }
     if (
       this.repeat === 'one' &&
       !this.advancing &&
@@ -1535,6 +1877,7 @@ export class PlaybackEngine {
       this.emitSrReplay(item);
       this.emitSrOnStart = false;
       this.reportedStartFor = item?.id ?? this.reportedStartFor;
+      this.armLeave();
     }
 
     this.lastStatus = status;
@@ -1546,7 +1889,7 @@ export class PlaybackEngine {
       this.lastPosAt = Date.now();
     }
 
-    if (status.playing && !nativeComplete && status.currentTime > 0.12) {
+    if (status.playing && !nativeComplete && status.currentTime > 0.12 && !stuck) {
       this.advancing = false;
       this.endedHandled = false;
       this.resetPlayhead = false;
@@ -1560,8 +1903,11 @@ export class PlaybackEngine {
       }
     }
 
+    const duration = Math.max(this.displayDuration(), status.duration);
+    const earlyEnd = nativeComplete && duration > 8 && status.currentTime < 3;
+    const heard = this.heardLoadGen === this.loadGen && !earlyEnd;
     const decision = acceptCompletion({
-      gate: this.completion,
+      gate: heard ? this.completion : disarmCompletion(this.loadGen),
       itemId: this.currentItem()?.id ?? null,
       loadGen: this.loadGen,
       status,
@@ -1569,7 +1915,7 @@ export class PlaybackEngine {
       ignoreEndUntil: this.ignoreEndUntil,
       pendingSeek: this.pendingSeek,
     });
-    this.completion = decision.gate;
+    if (heard) this.completion = decision.gate;
     if (decision.accept) {
       void this.advanceFromEnd();
       this.emit();
@@ -1592,12 +1938,24 @@ export class PlaybackEngine {
     return this.reportChain;
   }
 
-  private async report(kind: 'start' | 'progress', paused?: boolean) {
+  private async report(kind: 'start' | 'progress', paused?: boolean, includeQueue = false) {
     const session = this.session;
     const item = this.currentItem();
     const playSessionId = this.playSessionId;
     if (!session || !item || !playSessionId) return;
     const isPaused = paused ?? !this.wantPlaying;
+    if (kind === 'start') {
+      if (this.reportedStartFor === item.id) return;
+      this.reportedStartFor = item.id;
+    }
+    if (kind === 'progress' && !includeQueue) {
+      const pauseChanged = this.lastPostedPaused !== isPaused;
+      if (!pauseChanged && Date.now() - this.lastProgressPostAt < 8_000) return;
+      this.lastProgressPostAt = Date.now();
+      this.lastPostedPaused = isPaused;
+    }
+    const sendSrStart = kind === 'start' && this.emitSrOnStart && this.srStartFor !== item.id;
+    if (kind === 'start') this.emitSrOnStart = true;
     await this.enqueueReport(async () => {
       if (this.playSessionId !== playSessionId) return;
       if (this.session?.accessToken !== session.accessToken) return;
@@ -1619,20 +1977,22 @@ export class PlaybackEngine {
         repeatMode: jellyfinRepeat(this.repeat),
         playbackOrder: (this.shuffle ? 'Shuffle' : 'Default') as PlaybackOrder,
         queue,
+        includeQueue,
       });
+      if (sendSrStart && this.srStartFor !== item.id) {
+        this.srStartFor = item.id;
+        postSrEventSafe({
+          eventType: 'PLAY_START',
+          trackId: item.id,
+          positionMs: this.displayPosition() * 1000,
+          durationMs: this.displayDuration() * 1000,
+        });
+      }
       try {
         if (kind === 'start') {
           await api.reportPlaying(body);
+          if (this.playSessionId !== playSessionId) return;
           this.reportedStartFor = item.id;
-          if (this.emitSrOnStart) {
-            postSrEventSafe({
-              eventType: 'PLAY_START',
-              trackId: item.id,
-              positionMs: this.displayPosition() * 1000,
-              durationMs: this.displayDuration() * 1000,
-            });
-          }
-          this.emitSrOnStart = true;
         } else {
           await api.reportProgress(body);
         }
@@ -1648,7 +2008,7 @@ export class PlaybackEngine {
     if (this.pendingSeek > 0.05) return;
     if (this.wantPlaying === status.playing) return;
     this.wantPlaying = status.playing;
-    bindMediaSessionSkip(this);
+    bindMediaSessionTransport(this);
     if (status.playing) {
       void this.report('progress', false);
       this.emitSrTransport('RESUME');

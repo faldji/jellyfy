@@ -22,12 +22,12 @@ One JS runtime. Native modules (`expo-audio`, SecureStore, file system) are call
 
 | Target | Command | Notes |
 |--------|---------|-------|
-| Metro | `npm start` | Expo Go: browse UI only |
-| Android | `npx expo run:android` | Background audio + lock screen |
+| Metro | `npm start` | Expo Go: in-app play only. No background audio or lock screen |
+| Android | `npx expo run:android` | Background audio + lock screen. `expo-audio` is compiled from the patched source |
 | iOS | `npx expo run:ios` | macOS + Xcode |
-| Web | `npx expo start --web` | Browse + login. CORS on the server. No downloads. |
+| Web | `npx expo start --web` | In-page playback. CORS on the server. No downloads, no lock screen. |
 
-Background playback needs a development build, not Expo Go. See ADR-0001.
+Background playback needs a development build, not Expo Go. Lock-screen transport beyond play/pause is `patches/expo-audio+57.0.5.patch`. See ADR-0001 and `docs/agents/playback.md`.
 
 ## Alias
 
@@ -62,7 +62,7 @@ Device id is kept across logout.
 | Key | Owner | What |
 |-----|-------|------|
 | `jellyfy.session` / `jellyfy.deviceId` | `useAuth` via `src/lib/storage.ts` | Secrets |
-| `jellyfy.settings` | `useSettings` | Quality, theme, play-all, last login, SR flags |
+| `jellyfy.settings` | `useSettings` | Quality (default original), theme (default system), play-all, last login, SR flags. Version 2 rewrites a saved High quality and Dark theme |
 | `jellyfy.library-ui` | `useLibrary` | Tab/sort/layout/liked-only. **Not** `musicViewId`. |
 | `jellyfy.home-layout` | `useHomeLayout` | Home rail order |
 | `jellyfy.recents` | `useRecents` | Per-owner recents + search queries |

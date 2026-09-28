@@ -12,18 +12,19 @@ export function leaveEventType(
   return nearEnd ? 'PLAY_COMPLETE' : 'SKIP';
 }
 
-/** Native loop / a replace after ended() often leaves currentTime at the previous duration. */
+/**
+ * replace() often keeps the previous item's currentTime.
+ * Real playback cannot get this far ahead of the time since the source opened.
+ */
 export function playheadLooksStuckAtEnd(
   currentTime: number,
-  duration: number,
-  didJustFinish: boolean,
+  elapsedSinceLoadMs: number,
   requestedStart: number
 ): boolean {
   if (requestedStart > 0.05) return false;
-  if (didJustFinish && currentTime > 1) return true;
   if (!(currentTime > 1.25)) return false;
-  if (duration > 2 && currentTime >= duration - 1) return true;
-  return currentTime > 1.25 && requestedStart <= 0.05;
+  const elapsedSec = Math.max(0, elapsedSinceLoadMs) / 1000;
+  return currentTime > elapsedSec + 1.5;
 }
 
 export function isNativeLoopWrap(prevTime: number, currentTime: number, duration: number): boolean {

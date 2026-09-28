@@ -4,7 +4,7 @@ import { useMemo } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useAlbumTracks, useFavoriteMutation, useItem } from '@/api/hooks';
+import { useAlbumTrackPages, useFavoriteMutation, useItem } from '@/api/hooks';
 import { ActionSheet } from '@/components/ActionSheet';
 import { CoverArt } from '@/components/CoverArt';
 import { IconButton } from '@/components/IconButton';
@@ -13,6 +13,7 @@ import { useTrackActions } from '@/components/useTrackActions';
 import { spacing } from '@/constants/theme';
 import { groupAlbumDiscs } from '@/lib/album';
 import { artistLine, formatTicks, plural, yearOf } from '@/lib/format';
+import { nearListEnd } from '@/lib/near-list-end';
 import { closeOverlay } from '@/lib/navigation';
 import { useCollectionPlayback } from '@/hooks/use-collection-playback';
 import { useNowPlayingPadding } from '@/components/MiniPlayer';
@@ -25,11 +26,13 @@ export default function AlbumScreen() {
   const insets = useSafeAreaInsets();
   const c = useColors();
   const album = useItem(id);
-  const tracks = useAlbumTracks(id);
+  const tracks = useAlbumTrackPages(id);
   const playItems = usePlayer((s) => s.playItems);
+  const playItem = usePlayer((s) => s.playItem);
   const actions = useTrackActions();
   const favorite = useFavoriteMutation();
-  const items = tracks.data ?? [];
+  const items = useMemo(() => tracks.data?.pages.flatMap((page) => page.items ?? []) ?? [], [tracks.data]);
+  const songCount = tracks.data?.pages[0]?.totalRecordCount ?? items.length;
   const discs = useMemo(() => groupAlbumDiscs(items), [items]);
   const multiDisc = discs.length > 1;
   const collection = useCollectionPlayback(id, items, album.data);
@@ -38,7 +41,7 @@ export default function AlbumScreen() {
   const artistId = album.data?.albumArtists?.[0]?.id ?? album.data?.artistItems?.[0]?.id;
   const meta = [
     yearOf(album.data ?? {}),
-    items.length ? plural(items.length, 'song') : null,
+    songCount ? plural(songCount, 'song') : null,
     album.data?.runTimeTicks || album.data?.cumulativeRunTimeTicks
       ? formatTicks(album.data.cumulativeRunTimeTicks ?? album.data.runTimeTicks)
       : null,
@@ -49,7 +52,11 @@ export default function AlbumScreen() {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: c.bg }}
-      contentContainerStyle={{ paddingTop: insets.top + 4, paddingBottom: bottomPad }}>
+      contentContainerStyle={{ paddingTop: insets.top + 4, paddingBottom: bottomPad }}
+      scrollEventThrottle={16}
+      onScroll={(event) => {
+        if (nearListEnd(event) && tracks.hasNextPage && !tracks.isFetchingNextPage) void tracks.fetchNextPage();
+      }}>
       <View style={styles.nav}>
         <IconButton name="chevron-back" accessibilityLabel="Back" onPress={() => closeOverlay(router)} />
       </View>
@@ -95,10 +102,24 @@ export default function AlbumScreen() {
           name="shuffle"
           color={c.text}
           accessibilityLabel="Shuffle album"
-          onPress={collection.shuffle}
+          onPress={() => {
+            if (collection.busy) return;
+            if (!tracks.hasNextPage && items.length) {
+              collection.shuffle();
+              return;
+            }
+            if (album.data) void playItem(album.data, { shuffle: true, contextId: id });
+          }}
         />
         <Pressable
-          onPress={collection.play}
+          onPress={() => {
+            if (collection.busy) return;
+            if (collection.active || (!tracks.hasNextPage && items.length)) {
+              collection.play();
+              return;
+            }
+            if (album.data) void playItem(album.data, { contextId: id });
+          }}
           style={[styles.play, { backgroundColor: c.accent }]}
           accessibilityLabel={collection.busy ? 'Loading' : albumPlaying ? 'Pause' : 'Play'}>
           {collection.busy ? (
@@ -129,6 +150,9 @@ export default function AlbumScreen() {
           ))}
         </View>
       ))}
+      {tracks.isLoading || tracks.isFetchingNextPage ? (
+        <ActivityIndicator color={c.text} style={{ marginVertical: 20 }} />
+      ) : null}
 
       <ActionSheet
         visible={actions.visible}

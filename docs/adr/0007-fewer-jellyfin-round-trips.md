@@ -19,7 +19,7 @@ Jellyfin 10.12 has a WebSocket at `/socket` for session and library events. This
 - Collapse search-all to one mixed `/Items` query.
 - Slim "fans also like" to similar + own likes + recents (no other-user fan-out).
 - After a favorite, refetch only favorite lists (`invalidateAfterFavorite`). Collection track caches stay warm. Recents keep `userData.isFavorite`.
-- Send `nowPlayingQueue` on play start/stop only. Drop periodic SR PLAY_PROGRESS.
+- Send `nowPlayingQueue` on play start, stop, and a shuffle that replaces the order. Periodic progress omits it. Drop periodic SR PLAY_PROGRESS.
 - Snap artwork sizes to buckets and use expo-image `memory-disk` cache.
 
 ## Consequences

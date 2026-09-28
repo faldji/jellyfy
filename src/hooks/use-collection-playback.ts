@@ -10,6 +10,7 @@ export function useCollectionPlayback(contextId?: string, items: BaseItem[] = []
   const active = Boolean(contextId && activeId === contextId);
 
   return {
+    active,
     playing: active && playing,
     busy: active && preparing,
     play() {

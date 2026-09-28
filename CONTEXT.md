@@ -1,6 +1,6 @@
 # Jellyfy
 
-A music client for one self-hosted Jellyfin library. Android and iOS are first-class. Web can browse and log in; background audio and lock-screen controls need a native development build.
+A music client for one self-hosted Jellyfin library. Android and iOS are first-class. Web can browse, log in, and play in the page. Background audio, the lock screen, and downloads need a native development build.
 
 Jellyfin is the library of record. This repo is the player. Smart Recommendations (SR) is an optional sidecar: when it is off or down, Jellyfin behavior is unchanged.
 
@@ -10,7 +10,7 @@ Jellyfin is the library of record. This repo is the player. Smart Recommendation
 |----|-----|
 | Sign-in, browse, search, likes, playlists | A second library server |
 | Queue, shuffle, repeat, radio / Instant Mix | Store signing, EAS submit |
-| Stream + offline download (native) | Hosting the SR model / training stack |
+| Stream, offline download, and lock-screen transport (native) | Hosting the SR model / training stack |
 | Report play state to Jellyfin | Video, TV, photos |
 
 ## Glossary
